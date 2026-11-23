@@ -128,10 +128,13 @@ export async function pollDevice(
       };
     }
 
-    const sliceMs =
+    const regularSliceMs =
       nowMs - startedMs < 1_500
         ? POLL_CADENCE.DEVICE_POLL_SLICE_MS
         : POLL_CADENCE.DEVICE_POLL_SLOW_SLICE_MS;
+    const idleInBackground = devState.app_lifecycle_state === "background" &&
+      nowMs - (devState.last_task_at ?? 0) > POLL_CADENCE.WARM_WINDOW_MS;
+    const sliceMs = idleInBackground ? POLL_CADENCE.IDLE_BACKGROUND_POLL_SLICE_MS : regularSliceMs;
     await sleep(Math.min(sliceMs, deadline - nowMs));
 
     const checkMs = Date.now();
@@ -176,6 +179,7 @@ export async function submitDeviceResult(
         value?: string;
         identifier?: string;
         frame: [number, number, number, number];
+        row_label?: string;
         flags?: string[];
         from_picture?: boolean;
         change?: "added" | "moved" | "kept";

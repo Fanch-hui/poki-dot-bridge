@@ -17,7 +17,10 @@ function formatElementLine(el: ScreenElement): string {
   if (text) parts.push(`"${text}"`);
   parts.push(`[${el.frame.map((n) => Math.round(n)).join(",")}]`);
   if (el.from_picture) parts.push("(ocr)");
-  if (el.flags && el.flags.length > 0) parts.push(`[${el.flags.join(",")}]`);
+  const flags = el.flags?.filter((flag) => flag !== "row_unverified") ?? [];
+  if (flags.length > 0) parts.push(`[${flags.join(",")}]`);
+  if (el.row_label) parts.push(`[row: ${el.row_label}]`);
+  if (el.flags?.includes("row_unverified")) parts.push("[row unverified]");
   return parts.join(" ");
 }
 
@@ -38,6 +41,9 @@ export function formatObservationText(obs: ObservationRecord): string {
     lines.push(`notes: ${obs.notes.join(" | ")}`);
   }
   if (obs.elements.length > 0) {
+    if (obs.elements.some((el) => el.flags?.includes("row_unverified"))) {
+      lines.push("For [row unverified], use a point only if you can identify the intended row on the current screenshot. The numbered tap cannot confirm its target.");
+    }
     lines.push("elements:");
     for (const el of obs.elements.slice(0, 120)) {
       lines.push(`  ${formatElementLine(el)}`);

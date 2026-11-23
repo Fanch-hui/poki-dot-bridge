@@ -129,7 +129,8 @@ struct DotIslandExpandedBottom: View {
             meta: face.meta,
             shot: nil
         )
-        .padding(.horizontal, horizPad)
+        .padding(.leading, horizPad + 4)
+        .padding(.trailing, horizPad)
         .padding(.top, topPad)
         .padding(.bottom, bottomPad)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -148,6 +149,8 @@ private struct DotActivityContent: View {
     let meta: ActivityFace.Meta
     let shot: UIImage?
 
+    private var textAlignment: Alignment { surface == .island ? .center : .leading }
+
     var body: some View {
         if hasBottomActionRow(for: face) {
             twoRowBody
@@ -157,13 +160,13 @@ private struct DotActivityContent: View {
     }
 
     private var singleRowBody: some View {
-        let ringSize: CGFloat = surface == .lockScreen ? 36 : 40
+        let ringSize: CGFloat = surface == .lockScreen ? 36 : 44
         let buttonSize: CGFloat = surface == .lockScreen ? 34 : 38
         let inlineMeta = (surface == .island && face.bottom.isProgress && meta != .none) ? meta : nil
         return HStack(alignment: .center, spacing: 14) {
             DotRingView(diameter: ringSize, color: palette.mark)
             DotTextStack(face: face, palette: palette, surface: surface, maxSubtitleLines: face.subtitleLines, inlineMeta: inlineMeta)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: textAlignment)
             if case .progress(_, let stop) = face.bottom {
                 HStack(spacing: 10) {
                     if surface == .lockScreen, meta != .none { DotMetaView(meta: meta, palette: palette) }
@@ -183,7 +186,7 @@ private struct DotActivityContent: View {
         let spacing: CGFloat = surface == .island ? (face.offersStopAsking ? 6 : 10) : (face.offersStopAsking ? 10 : 12)
         return VStack(alignment: .leading, spacing: spacing) {
             HStack(alignment: .center, spacing: 12) {
-                DotRingView(diameter: 34, color: palette.mark)
+                DotRingView(diameter: surface == .lockScreen ? 34 : 38, color: palette.mark)
                 DotTextStack(
                     face: face,
                     palette: palette,
@@ -191,7 +194,7 @@ private struct DotActivityContent: View {
                     maxSubtitleLines: face.offersStopAsking ? 1 : face.subtitleLines,
                     inlineMeta: nil
                 )
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: textAlignment)
                 if meta != .none { DotMetaView(meta: meta, palette: palette) }
                 if let shot {
                     DotThumbnailView(image: shot, size: CGSize(width: 26, height: 52), corner: 5, border: palette.thumbnailBorder)
@@ -222,7 +225,7 @@ private struct DotTextStack: View {
     let inlineMeta: ActivityFace.Meta?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: surface == .island ? .center : .leading, spacing: 2) {
             if face.hasKicker || inlineMeta != nil {
                 HStack(spacing: 6) {
                     if face.hasKicker { DotKickerRow(face: face, palette: palette) }
@@ -240,6 +243,7 @@ private struct DotTextStack: View {
                 DotRunLine(palette: palette).padding(.top, 5)
             }
         }
+        .multilineTextAlignment(surface == .island ? .center : .leading)
     }
 }
 

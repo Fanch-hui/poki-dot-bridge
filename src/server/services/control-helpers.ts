@@ -86,7 +86,9 @@ export function shouldAttachScreenshot(
   if (mode === "never") return false;
   if (fullMode) return true;
   if (obs.elements.length === 0) return true;
-  if (obs.elements.some((e) => e.from_picture || e.type === "WebView" || e.flags?.includes("collapsed"))) {
+  if (obs.elements.some((e) =>
+    e.from_picture || e.type === "WebView" || e.flags?.includes("collapsed") || e.flags?.includes("row_unverified"),
+  )) {
     return true;
   }
   return obs.notes.some(

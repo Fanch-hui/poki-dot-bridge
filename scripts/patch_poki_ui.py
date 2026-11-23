@@ -182,6 +182,17 @@ def patch_dot_island(bridge_root: Path, poki_root: Path) -> None:
         face.caller = caller""",
         "Dot Bridge approval status",
     )
+    replace_once(
+        shared / "ActivityFace.swift",
+        "    func face(stale: Bool) -> ActivityFace {",
+        """    func face(stale: Bool) -> ActivityFace {
+        if stale, phase == .done {
+            var ready = self
+            ready.headline = "Waiting for agent"
+            return ready.quietFace
+        }""",
+        "Dot Bridge expired completion shows Ready",
+    )
 
     widget = poki_root / "native/ios-app/PokiWidgets/PokiWidgetsBundle.swift"
     replace_once(
@@ -256,6 +267,42 @@ def patch_dot_island(bridge_root: Path, poki_root: Path) -> None:
         state.uiLanguage = AppLocalization.language
         trimToFit()""",
         "Dot Bridge activity language propagation",
+    )
+    replace_once(
+        controller,
+        "    func finishNow(alert: Bool, result: String? = nil, task: String? = nil) -> Bool {",
+        "    func finishNow(alert: Bool, result: String? = nil, task: String? = nil, confirmedWhileIdle: Bool = false) -> Bool {",
+        "Dot Bridge explicit completion",
+    )
+    replace_once(
+        controller,
+        "        guard state.phase == .working, state.approval == nil, state.handoff == nil else {",
+        """        let canFinish = state.phase == .working || (confirmedWhileIdle && state.phase == .idle)
+        guard canFinish, state.approval == nil, state.handoff == nil else {""",
+        "Dot Bridge completion after the activity already settled",
+    )
+    replace_once(
+        controller,
+        "    var foldAfter: Duration = .seconds(30)",
+        """    var foldAfter: Duration = .seconds(30)
+    private static let completionFeedbackSeconds: TimeInterval = 3""",
+        "Dot Bridge completion feedback duration",
+    )
+    replace_once(
+        controller,
+        """        foldTimer = Task { [weak self, foldAfter] in
+            try? await Task.sleep(for: foldAfter)""",
+        """        let delay = state.phase == .done ? min(foldAfter, .seconds(Self.completionFeedbackSeconds)) : foldAfter
+        foldTimer = Task { [weak self] in
+            try? await Task.sleep(for: delay)""",
+        "Dot Bridge brief completion feedback",
+    )
+    replace_once(
+        controller,
+        "        let stale = state.approval?.expires ?? (state.phase == .working ? Date.now.addingTimeInterval(600) : nil)",
+        """        let completionDeadline = state.phase == .done ? state.endedAt?.addingTimeInterval(Self.completionFeedbackSeconds) : nil
+        let stale = state.approval?.expires ?? completionDeadline ?? (state.phase == .working ? Date.now.addingTimeInterval(600) : nil)""",
+        "Dot Bridge completion expires during background suspension",
     )
     replace_once(
         controller,

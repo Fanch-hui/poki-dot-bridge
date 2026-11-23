@@ -160,7 +160,9 @@ struct DotIslandTrailing: View {
             return "exclamationmark.triangle.fill"
         case .pairing, .setup:
             return "gearshape.fill"
-        case .idle, .done, .stopped:
+        case .done:
+            return isStale ? nil : "checkmark"
+        case .idle, .stopped:
             // Keep the activity alive so a later background request can show its status.
             return nil
         }

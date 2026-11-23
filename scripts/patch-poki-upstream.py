@@ -45,7 +45,12 @@ def patch_project_base(poki_root: pathlib.Path) -> None:
 
 def patch_live_core(poki_root: pathlib.Path) -> None:
     live_core = poki_root / "native/ios-app/Poki/Runtime/LiveCore.swift"
-    replace_once(live_core, "        config.screenHistory = HistoryStore.agentSource\n", "", "Dot Bridge screen history")
+    replace_once(
+        live_core,
+        "        config.screenHistory = HistoryStore.agentSource\n",
+        "        config.standaloneObservations = true\n",
+        "Dot Bridge standalone observations",
+    )
     replace_once(
         live_core,
         "    func start(relay: RelayAddress) { core.start(relay: relay) }",
@@ -135,6 +140,7 @@ def patch_app_model(poki_root: pathlib.Path) -> None:
         endingTasks -= 1
         guard lastAgentActivity == activityAtFinish, canFinishDotAutomation(session: session) else { return false }
         outsideAgentsAtWork.removeValue(forKey: session)
+        activity.finishNow(alert: false, confirmedWhileIdle: true)
         closeAfterTask("the Dot task ended")
         return true
     }

@@ -187,6 +187,10 @@ public final class DeviceLifecycleCoordinator: @unchecked Sendable {
         if snap.lifecycle == .foreground && serverConfig.mode != "stopped" && serverConfig.mode != "locked" {
             return Double(min(max(50, serverConfig.delay_ms), 2_000)) / 1000.0
         }
+        // An unlocked phone remains available for a new Dot task while Poki is in the background.
+        if snap.lifecycle == .background && serverConfig.mode == "idle" {
+            return Double(min(max(50, serverConfig.delay_ms), 1_000)) / 1000.0
+        }
         return Double(max(50, serverConfig.delay_ms)) / 1000.0
     }
 
@@ -200,6 +204,9 @@ public final class DeviceLifecycleCoordinator: @unchecked Sendable {
             return 0
         }
         if snap.lifecycle == .background {
+            if serverConfig.mode == "idle" && serverConfig.wait_ms == 0 {
+                return min(defaultWaitMs, 5_000)
+            }
             return min(max(0, serverConfig.wait_ms), 5_000)
         }
         // In foreground, always use a bounded long-poll even if the server starts in "idle" right after pairing.

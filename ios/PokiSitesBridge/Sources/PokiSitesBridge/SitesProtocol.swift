@@ -123,6 +123,7 @@ public struct ScreenElementDTO: Sendable, Codable, Equatable {
     public var value: String?
     public var identifier: String?
     public var frame: [Double]
+    public var row_label: String?
     public var flags: [String]?
     public var from_picture: Bool?
     public var change: String?

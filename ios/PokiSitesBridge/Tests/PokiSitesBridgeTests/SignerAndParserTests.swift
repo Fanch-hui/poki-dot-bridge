@@ -89,6 +89,29 @@ final class SignerAndParserTests: XCTestCase {
         XCTAssertEqual(parsed.observation.elements[1].flags, ["collapsed"])
     }
 
+    func testDuplicateControlsKeepVerifiedOrUnverifiedRowContext() throws {
+        let sample = """
+        app: Example
+        elements (3):
+        1 Button "选规格" [280,100,90,44] [row: 生椰拿铁]
+        2 Button "选规格" [280,180,90,44] [collapsed] [row unverified]
+        3 Button "设置" [20,20,90,44]
+        """
+        let parsed = PokiOutputParser.parse(toolName: "look", text: sample, isError: false, screenshotJPEG: nil)
+        let elements = parsed.observation.elements
+        XCTAssertEqual(elements.map(\.ref), [1, 2, 3])
+        XCTAssertEqual(elements[0].row_label, "生椰拿铁")
+        XCTAssertNil(elements[0].flags)
+        XCTAssertNil(elements[1].row_label)
+        XCTAssertEqual(elements[1].flags, ["collapsed", "row_unverified"])
+        XCTAssertNil(elements[2].row_label)
+        XCTAssertNil(elements[2].flags)
+
+        let encoded = try JSONEncoder().encode(parsed.observation)
+        let decoded = try JSONDecoder().decode(ObservationPayloadDTO.self, from: encoded)
+        XCTAssertEqual(decoded.elements, elements)
+    }
+
     func testParseApprovalRequiredAndLockedScreen() {
         let sample = """
         app: Messages   read: 2026-11-22T07:01:00Z (180 ms)

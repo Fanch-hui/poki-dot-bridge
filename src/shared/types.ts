@@ -46,6 +46,7 @@ export interface ScreenElement {
   value?: string;
   identifier?: string;
   frame: [number, number, number, number];
+  row_label?: string;
   flags?: string[];
   from_picture?: boolean;
   change?: "added" | "moved" | "kept";

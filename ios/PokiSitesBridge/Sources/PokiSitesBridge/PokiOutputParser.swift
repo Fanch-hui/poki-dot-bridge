@@ -18,6 +18,7 @@ public enum PokiOutputParser {
     private static let elementRegex = try! NSRegularExpression(
         pattern: #"^\s*([+~]?)\s*(\d+)\s+([A-Za-z0-9_]+)(?:\s+"(.*)")?\s+\[(-?\d+),(-?\d+),(-?\d+),(-?\d+)\](.*)$"#
     )
+    private static let rowLabelRegex = try! NSRegularExpression(pattern: #"\[row: (.+)\]$"#)
     private static let approvalRegex = try! NSRegularExpression(
         pattern: #"^not_sent from action \d+:\s+approval_required\s+\(id\s+([^)\s]+)\)"#
     )
@@ -240,9 +241,10 @@ public enum PokiOutputParser {
             label = String(rawText[..<sep.lowerBound])
             value = String(rawText[sep.upperBound...])
         }
-        let tail = str(9) ?? ""
+        let tail = (str(9) ?? "").trimmingCharacters(in: .whitespaces)
         var flags: [String] = []
         if tail.contains("[collapsed]") { flags.append("collapsed") }
+        if tail.hasSuffix("[row unverified]") { flags.append("row_unverified") }
         let fromPic = tail.contains("(read from the picture)")
         return ScreenElementDTO(
             ref: ref,
@@ -251,6 +253,7 @@ public enum PokiOutputParser {
             value: value,
             identifier: nil,
             frame: [x, y, w, h],
+            row_label: firstCapture(rowLabelRegex, in: tail),
             flags: flags.isEmpty ? nil : flags,
             from_picture: fromPic ? true : nil,
             change: change

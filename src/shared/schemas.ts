@@ -273,6 +273,7 @@ export const ScreenElementSchema = z.object({
   value: z.string().optional(),
   identifier: z.string().optional(),
   frame: z.tuple([z.number(), z.number(), z.number(), z.number()]),
+  row_label: z.string().min(1).optional(),
   flags: z.array(z.string()).optional(),
   from_picture: z.boolean().optional(),
   change: z.enum(["added", "moved", "kept"]).optional(),

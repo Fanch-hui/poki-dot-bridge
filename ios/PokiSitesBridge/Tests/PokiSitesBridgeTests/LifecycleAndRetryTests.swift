@@ -9,6 +9,7 @@ private actor WakePollingTransport: HTTPTransporting {
     private var pollCount = 0
     private var activePolls = 0
     private var peakActivePolls = 0
+    private var firstPollWaitMs: Int?
 
     init(firstPoll: XCTestExpectation, nextPoll: XCTestExpectation, holdFirstPoll: Bool) {
         self.firstPoll = firstPoll
@@ -28,6 +29,9 @@ private actor WakePollingTransport: HTTPTransporting {
         case "/api/device/poll":
             pollCount += 1
             let count = pollCount
+            if count == 1, let body = request.httpBody {
+                firstPollWaitMs = (try? JSONDecoder().decode([String: JSONValue].self, from: body))?["wait_ms"]?.intValue
+            }
             activePolls += 1
             peakActivePolls = max(peakActivePolls, activePolls)
             defer { activePolls -= 1 }
@@ -52,6 +56,7 @@ private actor WakePollingTransport: HTTPTransporting {
     }
 
     func maximumConcurrentPolls() -> Int { peakActivePolls }
+    func initialPollWaitMs() -> Int? { firstPollWaitMs }
 }
 
 final class LifecycleAndRetryTests: XCTestCase {
@@ -70,6 +75,28 @@ final class LifecycleAndRetryTests: XCTestCase {
         monitor.stop()
     }
     #endif
+
+    func testBackgroundIdleLongPollsAndDoesNotSleepTenSeconds() async throws {
+        let first = expectation(description: "background idle poll started")
+        let next = expectation(description: "background idle polled again promptly")
+        let transport = WakePollingTransport(firstPoll: first, nextPoll: next, holdFirstPoll: false)
+        let controller = SitesBridgeController(
+            config: SitesBridgeConfig(heartbeatIntervalSeconds: 60),
+            store: InMemoryCredentialStore(),
+            executor: MockPokiExecutor(),
+            transport: transport
+        )
+        _ = try await controller.pair(sitesURL: "http://127.0.0.1:3000", pairingCode: "1111-2222-3333", deviceName: nil)
+        await controller.updateLifecycle(foreground: false)
+        await controller.start()
+
+        await fulfillment(of: [first, next], timeout: 2)
+        let waitMs = await transport.initialPollWaitMs()
+        let peak = await transport.maximumConcurrentPolls()
+        XCTAssertEqual(waitMs, 5_000)
+        XCTAssertEqual(peak, 1)
+        await controller.stop()
+    }
 
     func testForegroundWakeInterruptsIdlePollDelay() async throws {
         let first = expectation(description: "background poll completed")

@@ -17,6 +17,8 @@ import { cancelTask, dispatchPhoneDo, dispatchPhoneLook, emergencyStop, getTaskR
 import { computePollConfig, pairDevice } from "../src/server/services/device-pairing-service.ts";
 import { handleDeviceCancel, heartbeatDevice, pollDevice, submitDeviceResult } from "../src/server/services/device-service.ts";
 import { formatTaskOutcome } from "../src/server/mcp/formatters.ts";
+import { DeviceResultRequestSchema } from "../src/shared/schemas.ts";
+import { MOCK_JPEG_BASE64 } from "../scripts/mock-iphone.ts";
 
 async function setupPairedDevice() {
   const env = createLocalRuntimeEnv({ memoryOnly: true, overrides: { LOCAL_DEV_AUTO_AUTH: "1" } });
@@ -76,6 +78,54 @@ async function setupPairedDevice() {
   assert.equal(hb.session_generation, 1);
   return { env, deviceId: paired.device_id, generation: paired.session_generation };
 }
+
+test("Repeated controls carry verified row context and request a screenshot when unresolved", async () => {
+  const { env, deviceId } = await setupPairedDevice();
+  const device = (await getDeviceById(env.db, deviceId))!.device;
+  async function report(taskId: string, unresolved: boolean) {
+    const nowMs = Date.now();
+    await enqueueTask(env.db, {
+      taskId, deviceId, toolName: "look", actionSummary: "look", payload: {},
+      createdBy: "dot", expiresAt: nowMs + 60_000, nowMs,
+    });
+    const claim = await pollDevice(env, device, { wait_ms: 0 });
+    assert.ok(claim.task);
+    const request = DeviceResultRequestSchema.parse({
+      task_id: claim.task.task_id,
+      lease_token: claim.task.lease_token,
+      status: "succeeded",
+      observation: {
+        elements: [
+          { ref: 1, type: "Button", label: "选规格", frame: [280, 100, 90, 44], row_label: "生椰拿铁" },
+          unresolved
+            ? { ref: 2, type: "Button", label: "选规格", frame: [280, 180, 90, 44], flags: ["row_unverified"] }
+            : { ref: 2, type: "Button", label: "选规格", frame: [280, 180, 90, 44], row_label: "橙 C 美式" },
+        ],
+        screenshot_base64: MOCK_JPEG_BASE64,
+      },
+    });
+    await submitDeviceResult(env, device, { ...request, approval_required: undefined, handoff_required: undefined });
+    return formatTaskOutcome(await getTaskResult(env, taskId, "auto"));
+  }
+
+  const verified = await report("tsk_verified_rows", false);
+  assert.equal(verified.structuredContent?.screenshot_attached, false);
+  const verifiedText = verified.content[0];
+  assert.ok(verifiedText.type === "text");
+  assert.doesNotMatch(verifiedText.text, /Repeated controls marked/);
+  assert.match(verifiedText.text, /1 Button "选规格" \[280,100,90,44\] \[row: 生椰拿铁\]/);
+  assert.match(verifiedText.text, /2 Button "选规格" \[280,180,90,44\] \[row: 橙 C 美式\]/);
+
+  const unresolved = await report("tsk_unverified_rows", true);
+  assert.equal(unresolved.structuredContent?.screenshot_attached, true);
+  assert.ok(unresolved.content.some((item) => item.type === "image"));
+  const unresolvedText = unresolved.content[0];
+  assert.ok(unresolvedText.type === "text");
+  assert.match(unresolvedText.text, /use a point only if you can identify the intended row on the current screenshot/);
+  assert.match(unresolvedText.text, /2 Button "选规格" \[280,180,90,44\] \[row unverified\]/);
+  const never = formatTaskOutcome(await getTaskResult(env, "tsk_unverified_rows", "never"));
+  assert.equal(never.structuredContent?.screenshot_attached, false);
+});
 
 test("Concurrent polls claim only the highest-priority task, then resume in queue order", async () => {
   const { env, deviceId } = await setupPairedDevice();
@@ -573,7 +623,7 @@ test("computePollConfig preserves long-poll responsiveness in background while k
   );
 });
 
-test("pollDevice promptly claims newly enqueued task during long-poll", async () => {
+test("pollDevice promptly claims a new task during an idle background long-poll", async () => {
   const { env, deviceId } = await setupPairedDevice();
   const dev = (await getDeviceById(env.db, deviceId))!.device;
 
@@ -592,7 +642,7 @@ test("pollDevice promptly claims newly enqueued task during long-poll", async ()
     });
   }, 100);
 
-  const pollRes = await pollDevice(env, dev, { wait_ms: 2_000 });
+  const pollRes = await pollDevice(env, dev, { wait_ms: 2_000, app_lifecycle_state: "background" });
   const elapsedMs = Date.now() - startedAt;
   assert.equal(pollRes.task?.task_id, "tsk_wakeup");
   assert.ok(elapsedMs < 1_000, `expected <1000ms wakeup, got ${elapsedMs}ms`);
