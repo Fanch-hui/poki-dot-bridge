@@ -147,6 +147,18 @@ export function formatTaskOutcome(data: {
     `timing_ms: queue=${queueWaitMs ?? "-"} exec=${deviceExecMs ?? "-"} total=${totalMs}`,
   ];
 
+  if (
+    (task.tool_name === "look" || task.tool_name === "do") && task.status === "succeeded" &&
+    !task.uncertain_execution && task.cancel_requested_at === null && task.error_code === null &&
+    !task.result?.approval_required && !task.result?.handoff_required
+  ) {
+    lines.push(
+      `closeout: If the whole user task is done, call phone_finish_task(last_task_id="${task.task_id}") before replying. ` +
+      "Include a new or improved, verified low-risk lesson when useful. " +
+      "If lesson is unavailable, save it once via phone_playbook_learn after requesting standby.",
+    );
+  }
+
   if (task.status === "queued" && data.queue_wait) {
     const queued = data.queue_wait;
     if (queued.active_task) {

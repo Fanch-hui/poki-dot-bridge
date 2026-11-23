@@ -173,7 +173,7 @@ export function registerConvenienceTools(
     "phone_open_app",
     {
       title: "Open App",
-      description: "Launch or bring an iOS app to the foreground by app name or bundle ID and return its screen observation.",
+      description: "Open an iOS app by name or bundle ID and return its screen. On a new task with a known goal, call phone_playbook_lookup first.",
       inputSchema: { device_id: commonOpts.device_id, app: z.string().min(1), fresh: z.boolean().optional().default(false), include_screenshot: commonOpts.include_screenshot, wait_timeout_ms: commonOpts.wait_timeout_ms },
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     },

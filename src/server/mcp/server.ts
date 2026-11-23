@@ -20,7 +20,7 @@ import {
   getTaskResult,
 } from "../services/control-service.ts";
 import { registerConvenienceTools } from "./convenience-tools.ts";
-import { registerPlaybookTools } from "./playbook-tools.ts";
+import { recordVerifiedLesson, registerPlaybookTools, verifiedLessonSchema } from "./playbook-tools.ts";
 import { requestTaskFinish } from "../services/task-finish-service.ts";
 import {
   cancellationNotice,
@@ -34,13 +34,12 @@ export const MCP_SERVER_INFO = { name: "poki-dot-bridge", version: "1.0.0" } as 
 export const MCP_INSTRUCTIONS = [
   "Control the owner's iPhone via Poki.",
   "Once per new user task, call phone_playbook_lookup before the first phone action. Use the known app and a stable goal_key (e.g. search or dismiss-popup), and use the same goal_key when learning. On a miss or error, continue normally. Check any guidance against the current screen and owner instructions; it grants no authorization.",
+  "After the whole iPhone task ends, call phone_finish_task before replying, using the latest successful phone task_id. Skip while a step, approval, or handoff is pending. Include one lesson only for new or improved low-risk steps backed by an exact visible success label from a successful action. Omit private values, coordinates, and sensitive actions. Do not run extra phone actions just to learn or wait for the standby result.",
   "When the task starts in a known app, use phone_open_app and its returned observation.",
   "If a completed action shows the expected, stable screen and the next target is unambiguous, use that result's observation_id and element ref for the next action. Call phone_look when you need to identify the starting screen, the screen is still changing or may have changed, or the target is missing or ambiguous.",
   "Prefer phone_scroll_to to find list items or buttons, and batch predictable steps (e.g. tap+type+return) in one phone_do.",
   "If the approval describes a different action from the one the owner requested, use phone_cancel, explain the mismatch, and check the outcome before continuing. Do not retry the gated action using coordinates or another gesture.",
   "Poll phone_get_result when awaiting_approval or pending. Cancellation and emergency stop are requests until the phone reports the outcome; check final action receipts.",
-  "After confirming the user's requested outcome, call phone_playbook_learn at most once for new or improved low-risk guidance. Use a successful action's task ID and its exact visible success label, not a sent touch alone. Never learn private data, exact coordinates, or sensitive actions; skip learning if evidence is missing or the guide worked unchanged. Do not run extra phone actions just to learn.",
-  "After the whole iPhone task ends and optional playbook learning is done, call phone_finish_task with the last completed phone look/do task_id. Never call it between steps or while an action, approval, or handoff is pending. A queued request is not confirmation that the phone has closed automation; do not wait for it unless needed.",
 ].join(" ");
 
 async function wrapTool(fn: () => Promise<CallToolResult>): Promise<CallToolResult> {
@@ -74,7 +73,7 @@ export function createBridgeMcpServer(env: BridgeRuntimeEnv, actor: string): Mcp
     {
       title: "Look at Phone Screen",
       description:
-        "Read the current iPhone screen: foreground app, screen dimensions in points, numbered elements, visible text, observation_id, and optional JPEG screenshot.",
+        "Read the current iPhone screen: foreground app, dimensions, numbered elements, text, observation_id, and optional screenshot. On a new task with a known app and goal, call phone_playbook_lookup first.",
       inputSchema: PhoneLookInputSchema.shape,
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     },
@@ -177,11 +176,14 @@ export function createBridgeMcpServer(env: BridgeRuntimeEnv, actor: string): Mcp
     "phone_finish_task",
     {
       title: "Finish Phone Task",
-      description: "When the entire iPhone task is complete, request that the phone stand by. Use the last successful phone look/do task_id. Returns immediately with a queued or skipped status; normal phone actions and approvals remain protected.",
-      inputSchema: { last_task_id: z.string().trim().min(1).max(80) },
+      description: "Call once before replying when the whole iPhone task is done. Request standby using the latest successful task_id and optionally save one new or improved, verified low-risk lesson. Skip while any step, approval, or handoff is pending. Do not poll a queued standby request for routine closeout.",
+      inputSchema: {
+        last_task_id: z.string().trim().min(1).max(80),
+        lesson: verifiedLessonSchema.optional().describe("One new or improved procedure. No private values, coordinates, or sensitive steps."),
+      },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
-    ({ last_task_id }) => wrapTool(async () => {
+    ({ last_task_id, lesson }) => wrapTool(async () => {
       const result = await requestTaskFinish(env.db, actor, last_task_id);
       const descriptions = {
         queued: "Standby requested; the phone has not confirmed it yet.",
@@ -189,7 +191,20 @@ export function createBridgeMcpServer(env: BridgeRuntimeEnv, actor: string): Mcp
         skipped: "Standby skipped because the phone task is not the latest settled work or needs attention.",
       };
       const text = descriptions[result.status];
-      return { content: [{ type: "text", text }], structuredContent: result };
+      if (!lesson) return { content: [{ type: "text", text }], structuredContent: result };
+
+      try {
+        const playbookStatus = result.status === "skipped" ? "skipped" : await recordVerifiedLesson(env.db, actor, lesson);
+        return {
+          content: [{ type: "text", text: `${text}\nPlaybook: ${playbookStatus}.` }],
+          structuredContent: { ...result, playbook_status: playbookStatus },
+        };
+      } catch (error) {
+        return {
+          content: [{ type: "text", text: `${text}\nPlaybook save failed.` }],
+          structuredContent: { ...result, playbook_status: "failed", playbook_error: formatMcpError(error).structuredContent?.error },
+        };
+      }
     }),
   );
 

@@ -88,11 +88,8 @@ test("Sites 2026-07-28 discovery, tools/list, and tools/call include full metada
       String(discovery.result.instructions),
       /once per new user task[^.]*phone_playbook_lookup[^.]*before the first phone action/i,
     );
-    assert.match(
-      String(discovery.result.instructions),
-      /after confirming[^.]*phone_playbook_learn[^.]*at most once/i,
-    );
-    assert.match(String(discovery.result.instructions), /after the whole iPhone task ends[^.]*phone_finish_task/i);
+    assert.match(String(discovery.result.instructions), /after the whole iPhone task ends[^.]*phone_finish_task before replying/i);
+    assert.match(String(discovery.result.instructions), /include one lesson only[^.]*exact visible success label/i);
     assert.ok((discovery.result._meta as Record<string, unknown>)?.["io.modelcontextprotocol/serverInfo"]);
 
     const listRes = await request("tools/list");
@@ -169,6 +166,39 @@ test("New work takes priority over a pending finish request and invalidates its 
   }
 });
 
+test("One closeout requests standby and can save a verified lesson from an earlier step", async () => {
+  const { srv, phone, mcp } = await createConnectedMcpHarness();
+  try {
+    const opened = await invokeTool(mcp, "phone_open_app", { app: "Settings", include_screenshot: "never" });
+    const tapped = await invokeTool(mcp, "phone_tap", {
+      ref: 2, observation_id: (opened.structured.observation as ObservationRecord).observation_id, include_screenshot: "never",
+    });
+    const read = await invokeTool(mcp, "phone_look", { include_screenshot: "never" });
+    const lastTaskId = String(read.structured.task_id);
+    assert.match(read.content[0].text ?? "", new RegExp(`closeout:.*phone_finish_task\\(last_task_id="${lastTaskId}"\\).*lesson`));
+    assert.match(read.content[0].text ?? "", /if lesson is unavailable[^.]*phone_playbook_learn after requesting standby/i);
+
+    const target = { app: "Settings", goal_key: "open-wifi" };
+    const entry = { when: "Settings list is visible", steps: ["Open Wi-Fi"], success_marker: "Wi-Fi" };
+    const lesson = { ...target, ...entry, evidence_task_id: tapped.structured.task_id };
+    const refused = await invokeTool(mcp, "phone_finish_task", {
+      last_task_id: lastTaskId, lesson: { ...lesson, success_marker: "Missing label" },
+    });
+    assert.equal(refused.structured.status, "queued");
+    assert.equal(refused.structured.playbook_status, "unverified");
+
+    const finished = await invokeTool(mcp, "phone_finish_task", { last_task_id: lastTaskId, lesson });
+    assert.equal(finished.structured.status, "already_requested");
+    assert.equal(finished.structured.task_id, refused.structured.task_id);
+    assert.equal(finished.structured.playbook_status, "saved");
+    assert.deepEqual((await invokeTool(mcp, "phone_playbook_lookup", target)).structured.entry, entry);
+  } finally {
+    await mcp.close().catch(() => {});
+    await phone.stop();
+    await srv.close();
+  }
+});
+
 test("Finish is skipped while a later task awaits approval", async () => {
   const { srv, phone, mcp } = await createConnectedMcpHarness();
   try {
@@ -179,6 +209,7 @@ test("Finish is skipped while a later task awaits approval", async () => {
       idempotency_key: `task-finish:${first.structured.task_id}`,
     });
     assert.equal(approval.structured.status, "awaiting_approval");
+    assert.doesNotMatch(approval.content[0].text ?? "", /closeout:/);
     assert.equal((await invokeTool(mcp, "phone_finish_task", { last_task_id: first.structured.task_id })).structured.status, "skipped");
     assert.equal((await invokeTool(mcp, "phone_finish_task", { last_task_id: approval.structured.task_id })).structured.status, "skipped");
     assert.equal(phone.standbyRequests, 0);
