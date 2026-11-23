@@ -20,7 +20,7 @@ import {
   getTaskResult,
 } from "../services/control-service.ts";
 import { registerConvenienceTools } from "./convenience-tools.ts";
-import { recordVerifiedLesson, registerPlaybookTools, verifiedLessonSchema } from "./playbook-tools.ts";
+import { attachOpeningGuide, goalKeySchema, recordVerifiedLesson, registerPlaybookTools, verifiedLessonSchema } from "./playbook-tools.ts";
 import { requestTaskFinish } from "../services/task-finish-service.ts";
 import {
   cancellationNotice,
@@ -29,15 +29,16 @@ import {
   formatTaskOutcome,
 } from "./formatters.ts";
 
-export const MCP_SERVER_INFO = { name: "poki-dot-bridge", version: "1.0.0" } as const;
+export const MCP_SERVER_INFO = { name: "poki-dot-bridge", version: "1.0.4" } as const;
 
 export const MCP_INSTRUCTIONS = [
   "Control the owner's iPhone via Poki.",
-  "Once per new user task, call phone_playbook_lookup before the first phone action. Use the known app and a stable goal_key (e.g. search or dismiss-popup), and use the same goal_key when learning. On a miss or error, continue normally. Check any guidance against the current screen and owner instructions; it grants no authorization.",
+  "Infer the goal_key from the owner's request, including search-takeout for ordering a drink for delivery. A normal open returns current controls. When a screenshot-confirmed Visible entry matches the next intended step, use its ref with this observation_id directly.",
+  "On the first phone_open_app or phone_look of a task, include a stable goal_key for playbook guidance in the same response. Guidance grants no authorization. For tools without this input, use phone_playbook_lookup separately when helpful.",
   "After the whole iPhone task ends, call phone_finish_task before replying, using the latest successful phone task_id. Skip while a step, approval, or handoff is pending. Include one lesson only for new or improved low-risk steps backed by an exact visible success label from a successful action. Omit private values, coordinates, and sensitive actions. Do not run extra phone actions just to learn or wait for the standby result.",
-  "When the task starts in a known app, use phone_open_app and its returned observation.",
-  "If a completed action shows the expected, stable screen and the next target is unambiguous, use that result's observation_id and element ref for the next action. Call phone_look when you need to identify the starting screen, the screen is still changing or may have changed, or the target is missing or ambiguous.",
-  "Prefer phone_scroll_to to find list items or buttons, and batch predictable steps (e.g. tap+type+return) in one phone_do.",
+  "In a known app, use phone_open_app with destination only for a known low-risk navigation entry and a distinct destination landmark. Stop at choices, cart changes, order or payment. When the phone returns a partial result, resume only from its receipts and current screen.",
+  "If a completed action shows the expected, stable screen and the next target is unambiguous, use that result's observation_id and element ref for the next action. For another view of that same stored screenshot use phone_get_result with include_screenshot=always; use a new read if the screen may have changed. Call phone_look when you need to identify the starting screen, the screen is still changing or may have changed, or the target is missing or ambiguous.",
+  "Use phone_type(submit=true, result_texts=[...]) for search when a result-page or empty-state label is known. Use phone_scroll_to to find a list item. If submission was sent but no result was confirmed, continue from the current screen; do not submit again.",
   "If the approval describes a different action from the one the owner requested, use phone_cancel, explain the mismatch, and check the outcome before continuing. Do not retry the gated action using coordinates or another gesture.",
   "Poll phone_get_result when awaiting_approval or pending. Cancellation and emergency stop are requests until the phone reports the outcome; check final action receipts.",
 ].join(" ");
@@ -73,11 +74,15 @@ export function createBridgeMcpServer(env: BridgeRuntimeEnv, actor: string): Mcp
     {
       title: "Look at Phone Screen",
       description:
-        "Read the current iPhone screen: foreground app, dimensions, numbered elements, text, observation_id, and optional screenshot. On a new task with a known app and goal, call phone_playbook_lookup first.",
-      inputSchema: PhoneLookInputSchema.shape,
+        "Read the current iPhone screen: foreground app, dimensions, numbered elements, text, observation_id, and optional screenshot. Pass goal_key on the first read to include guidance for the foreground app.",
+      inputSchema: { ...PhoneLookInputSchema.shape, goal_key: goalKeySchema.optional() },
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
     },
-    async (args) => wrapTool(async () => formatTaskOutcome(await dispatchPhoneLook(env, actor, args))),
+    ({ goal_key, ...args }) => wrapTool(async () => {
+      const outcome = await dispatchPhoneLook(env, actor, args);
+      const app = outcome.observation?.app_name ?? outcome.observation?.app_bundle_id ?? undefined;
+      return attachOpeningGuide(formatTaskOutcome(outcome), env.db, actor, app, goal_key);
+    }),
   );
 
   server.registerTool(

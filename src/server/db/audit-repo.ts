@@ -20,6 +20,10 @@ export function redactActionPayload(payload: Record<string, unknown>): Record<st
     if (typeof copy.type === "string") {
       copy.type = `[redacted:${copy.type.length}chars]`;
     }
+    if (copy.search_submit && typeof copy.search_submit === "object") {
+      const search = copy.search_submit as Record<string, unknown>;
+      copy.search_submit = { ref: search.ref, result_marker_count: Array.isArray(search.result_texts) ? search.result_texts.length : 0 };
+    }
     return copy;
   });
   return { ...payload, actions };

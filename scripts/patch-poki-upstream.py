@@ -8,6 +8,8 @@ import shutil
 import sys
 
 from patch_poki_core import patch_core_safety
+from patch_poki_launch_proof import patch_launch_proof
+from patch_poki_launch_wake import patch_launch_wake
 from patch_poki_ui import patch_dot_app, patch_dot_island, replace_once
 
 
@@ -296,6 +298,8 @@ def main() -> None:
     patch_dot_app(bridge_root, poki_root)
     patch_dot_island(bridge_root, poki_root)
     patch_core_safety(bridge_root, poki_root)
+    patch_launch_proof(bridge_root, poki_root)
+    patch_launch_wake(bridge_root, poki_root)
     print(f"Applied the Dot Bridge app and Live Activity to {poki_root}.")
 
 

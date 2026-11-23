@@ -16,9 +16,14 @@ public struct ParsedPokiExecution: Sendable, Equatable {
 /// Parses PokiCore `look`, `do`, and `status` outputs into structured D1/R2 observation payloads.
 public enum PokiOutputParser {
     private static let elementRegex = try! NSRegularExpression(
-        pattern: #"^\s*([+~]?)\s*(\d+)\s+([A-Za-z0-9_]+)(?:\s+"(.*)")?\s+\[(-?\d+),(-?\d+),(-?\d+),(-?\d+)\](.*)$"#
+        pattern: #"^\s*([+~]?)\s*(\d+)\s+([A-Za-z0-9_]+)(?:\s+"(.*)")?\s+\[(-?\d+),(-?\d+),(-?\d+),(-?\d+)\](.*)$"#,
+        options: [.dotMatchesLineSeparators]
+    )
+    private static let elementStartRegex = try! NSRegularExpression(
+        pattern: #"^[ \t]*[+~]?[ \t]*\d+[ \t]+[A-Za-z0-9_]+[ \t]+""#
     )
     private static let rowLabelRegex = try! NSRegularExpression(pattern: #"\[row: (.+)\]$"#)
+    private static let childRefsRegex = try! NSRegularExpression(pattern: #"\[children: ([0-9, ]+)\]"#)
     private static let approvalRegex = try! NSRegularExpression(
         pattern: #"^not_sent from action \d+:\s+approval_required\s+\(id\s+([^)\s]+)\)"#
     )
@@ -54,9 +59,10 @@ public enum PokiOutputParser {
         } else {
             currentText = text
         }
-        let lines = currentText.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        let lines = elementRecords(in: currentText)
         var appName: String?
         var screenWidth: Double?
+        var screenHeight: Double?
         var screenLocked = false
         var screenChanged: Bool?
         var notes: [String] = []
@@ -68,8 +74,20 @@ public enum PokiOutputParser {
         var withdrawnApprovalIds: Set<String> = []
         var handoff: PendingHandoffDTO?
         var finishedAppReturn = false
+        var uncertainMessage = false
 
         for line in lines {
+            if let el = parseElementLine(line) {
+                elements.append(el)
+                continue
+            }
+            if line.contains("what was sent is unknown") {
+                uncertainMessage = true
+            }
+            if line.hasPrefix("launch_timing: ") {
+                notes.append(line)
+                continue
+            }
             if line.hasPrefix("app: ") {
                 let raw = String(line.dropFirst(5))
                 appName = raw.components(separatedBy: "   read:").first?.trimmingCharacters(in: .whitespaces)
@@ -78,7 +96,16 @@ public enum PokiOutputParser {
                 }
                 continue
             }
-            if let width = firstCapture(screenshotWidthRegex, in: line).flatMap(Double.init) {
+            if line.hasPrefix("viewport: "), line.hasSuffix(" points") {
+                let dimensions = line.dropFirst("viewport: ".count).dropLast(" points".count).split(separator: "x")
+                if dimensions.count == 2, let width = Double(dimensions[0]), let height = Double(dimensions[1]),
+                   width > 0, height > 0 {
+                    screenWidth = width
+                    screenHeight = height
+                }
+                continue
+            }
+            if screenHeight == nil, let width = firstCapture(screenshotWidthRegex, in: line).flatMap(Double.init) {
                 screenWidth = width
                 continue
             }
@@ -132,9 +159,6 @@ public enum PokiOutputParser {
                 finishedAppReturn = true
                 continue
             }
-            if let el = parseElementLine(line) {
-                elements.append(el)
-            }
         }
 
         let pendingId = approvalId.flatMap { withdrawnApprovalIds.contains($0) ? nil : $0 }
@@ -166,7 +190,7 @@ public enum PokiOutputParser {
             app_bundle_id: nil,
             app_name: appName,
             screen_width: validScreenWidth,
-            screen_height: nil,
+            screen_height: screenHeight,
             coordinate_unit: "points",
             screen_locked: screenLocked,
             screen_changed: screenChanged,
@@ -179,7 +203,7 @@ public enum PokiOutputParser {
             screenshot_mime: "image/jpeg"
         )
 
-        let uncertain = currentText.contains("what was sent is unknown") || receipts.contains(where: { $0.status == "unknown" })
+        let uncertain = uncertainMessage || receipts.contains(where: { $0.status == "unknown" })
         let finalStatus: String
         if cancelled {
             finalStatus = "cancelled"
@@ -213,6 +237,47 @@ public enum PokiOutputParser {
         )
     }
 
+    /// A control label may span lines; merge only a complete record so that a
+    /// broken record cannot consume a following control or execution receipt.
+    private static func elementRecords(in text: String) -> [String] {
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        var records: [String] = []
+        var index = 0
+        while index < lines.count {
+            let line = lines[index]
+            guard parseElementLine(line) == nil,
+                  elementStartRegex.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)) != nil else {
+                records.append(line)
+                index += 1
+                continue
+            }
+            var end = index + 1
+            var length = line.utf16.count
+            var found: String?
+            while end < lines.count && end - index <= 256 && length <= 65_536 {
+                let next = lines[end]
+                if elementStartRegex.firstMatch(in: next, range: NSRange(next.startIndex..., in: next)) != nil { break }
+                length += next.utf16.count + 1
+                if next.contains("]") {
+                    let candidate = lines[index...end].joined(separator: "\n")
+                    if parseElementLine(candidate) != nil {
+                        found = candidate
+                        break
+                    }
+                }
+                end += 1
+            }
+            if let found {
+                records.append(found)
+                index = end + 1
+            } else {
+                records.append(line)
+                index += 1
+            }
+        }
+        return records
+    }
+
     private static func parseElementLine(_ line: String) -> ScreenElementDTO? {
         let range = NSRange(line.startIndex..., in: line)
         guard let match = elementRegex.firstMatch(in: line, range: range),
@@ -244,6 +309,8 @@ public enum PokiOutputParser {
         let tail = (str(9) ?? "").trimmingCharacters(in: .whitespaces)
         var flags: [String] = []
         if tail.contains("[collapsed]") { flags.append("collapsed") }
+        if tail.contains("[covered]") { flags.append("covered") }
+        if let children = firstCapture(childRefsRegex, in: tail) { flags.append("children: \(children)") }
         if tail.hasSuffix("[row unverified]") { flags.append("row_unverified") }
         let fromPic = tail.contains("(read from the picture)")
         return ScreenElementDTO(

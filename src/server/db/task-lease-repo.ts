@@ -226,34 +226,8 @@ export async function completeOrUpdateTaskFromDevice(
     nowMs: number;
   },
 ): Promise<{ ok: true; task: TaskRecord } | { ok: false; code: string; message: string }> {
-  const existing = await getTaskById(db, params.taskId);
-  if (!existing || existing.device_id !== params.deviceId) {
-    return { ok: false, code: "TASK_NOT_FOUND", message: "Task does not exist for device" };
-  }
-  if (existing.lease_token !== params.leaseToken) {
-    return { ok: false, code: "INVALID_LEASE_TOKEN", message: "Task lease token mismatch" };
-  }
-  if (
-    existing.claimed_by_generation !== null &&
-    existing.claimed_by_generation !== params.generation
-  ) {
-    return {
-      ok: false,
-      code: "STALE_GENERATION",
-      message: "Task claimed by an older session generation",
-    };
-  }
-
   const isTerminal = ["succeeded", "failed", "cancelled"].includes(params.status);
-  const existingTerminal = ["succeeded", "failed", "cancelled", "timed_out"].includes(existing.status);
-  const acceptsLateResult = isTerminal && (
-    existing.status === "timed_out" ||
-    (existing.status === "cancelled" && existing.error_code === CANCEL_ACK_PENDING_RESULT)
-  );
   const serializedResult = params.result ? JSON.stringify(params.result) : null;
-  if (existingTerminal && !acceptsLateResult) {
-    return { ok: true, task: existing };
-  }
   const nextLeaseExp = isTerminal
     ? null
     : params.nowMs +
@@ -406,6 +380,14 @@ export async function completeOrUpdateTaskFromDevice(
   const row = updatedTask.results[0];
   if (row) return { ok: true, task: mapTaskRow(row) };
   const current = await getTaskById(db, params.taskId);
-  if (current && current.lease_token === params.leaseToken) return { ok: true, task: current };
-  return { ok: false, code: "INVALID_LEASE_TOKEN", message: "Task lease token mismatch" };
+  if (!current || current.device_id !== params.deviceId) {
+    return { ok: false, code: "TASK_NOT_FOUND", message: "Task does not exist for device" };
+  }
+  if (current.lease_token !== params.leaseToken) {
+    return { ok: false, code: "INVALID_LEASE_TOKEN", message: "Task lease token mismatch" };
+  }
+  if (current.claimed_by_generation !== null && current.claimed_by_generation !== params.generation) {
+    return { ok: false, code: "STALE_GENERATION", message: "Task claimed by an older session generation" };
+  }
+  return { ok: true, task: current };
 }

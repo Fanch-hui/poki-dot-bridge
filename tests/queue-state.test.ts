@@ -127,6 +127,67 @@ test("Repeated controls carry verified row context and request a screenshot when
   assert.equal(never.structuredContent?.screenshot_attached, false);
 });
 
+test("An independently confirmed opening entry can return before transferring an unrelated screenshot", async () => {
+  const { env, deviceId } = await setupPairedDevice();
+  const device = (await getDeviceById(env.db, deviceId))!.device;
+  for (const flags of [["opening_label_visible"], [], ["opening_label_visible", "covered"]]) {
+    const pending = dispatchPhoneDo(env, "dot", {
+      device_id: deviceId, require_fresh_observation: false, actions: [{ launch: "Shop" }],
+      opening_labels: ["Search"], full: false, finish: false, include_screenshot: "auto", wait_timeout_ms: 5_000,
+    });
+    const claim = await pollDevice(env, device, { wait_ms: 2_000 });
+    assert.deepEqual(claim.task?.payload.opening_labels, ["Search"]);
+    const request = DeviceResultRequestSchema.parse({
+      task_id: claim.task!.task_id, lease_token: claim.task!.lease_token, status: "succeeded",
+      observation: {
+        app_name: "Shop",
+        elements: [
+          { ref: 3, type: "Button", label: "Search", frame: [20, 80, 90, 44], flags },
+          { ref: 4, type: "Other", label: "Advertisement", frame: [5, 200, 360, 120], flags: ["covered"] },
+        ],
+        screenshot_base64: MOCK_JPEG_BASE64,
+      },
+    });
+    await submitDeviceResult(env, device, { ...request, approval_required: undefined, handoff_required: undefined });
+    const result = formatTaskOutcome(await pending);
+    const confirmed = flags.length === 1;
+    assert.equal(result.structuredContent?.screenshot_attached, !confirmed);
+    const text = result.content[0];
+    assert.ok(text.type === "text");
+    assert.equal(text.text.includes('Visible entry: ref 3 "Search"'), confirmed);
+    assert.ok((await getTaskResult(env, claim.task!.task_id, "always")).screenshot);
+  }
+});
+
+test("A failed tap returns the saved screenshot with auto and never repeats the action", async () => {
+  const { env, deviceId } = await setupPairedDevice();
+  const device = (await getDeviceById(env.db, deviceId))!.device;
+  const nowMs = Date.now();
+  await enqueueTask(env.db, {
+    taskId: "tsk_covered", deviceId, toolName: "do", actionSummary: "tap", payload: {},
+    createdBy: "dot", expiresAt: nowMs + 60_000, nowMs,
+  });
+  const claim = await pollDevice(env, device, { wait_ms: 0 });
+  assert.ok(claim.task);
+  const request = DeviceResultRequestSchema.parse({
+    task_id: claim.task.task_id, lease_token: claim.task.lease_token,
+    status: "failed", error_code: "POKI_ERROR", error_message: "control is covered",
+    action_receipts: [{ index: 0, kind: "tap", status: "not_sent" }],
+    observation: {
+      elements: [{ ref: 1, type: "Button", label: "Search", frame: [10, 100, 90, 40] }],
+      screenshot_base64: MOCK_JPEG_BASE64,
+    },
+  });
+  await submitDeviceResult(env, device, { ...request, approval_required: undefined, handoff_required: undefined });
+
+  const result = formatTaskOutcome(await getTaskResult(env, "tsk_covered", "auto"));
+  assert.equal(result.structuredContent?.screenshot_attached, true);
+  assert.deepEqual(result.structuredContent?.action_receipts, [{ index: 0, kind: "tap", status: "not_sent" }]);
+  assert.ok(result.content.some((item) => item.type === "image"));
+  const noScreenshot = formatTaskOutcome(await getTaskResult(env, "tsk_covered", "never"));
+  assert.equal(noScreenshot.structuredContent?.screenshot_attached, false);
+});
+
 test("Concurrent polls claim only the highest-priority task, then resume in queue order", async () => {
   const { env, deviceId } = await setupPairedDevice();
   const nowMs = Date.now();
@@ -181,6 +242,39 @@ test("Concurrent polls claim only the highest-priority task, then resume in queu
     raw_text: "app: Settings",
   });
   assert.equal((await pollDevice(env, dev, { wait_ms: 0 })).task?.task_id, "tsk_one");
+});
+
+test("Device result requires the task's device, lease and session before updating", async () => {
+  const { env, deviceId } = await setupPairedDevice();
+  const nowMs = Date.now();
+  await enqueueTask(env.db, {
+    taskId: "tsk_result_auth", deviceId, toolName: "do", actionSummary: "tap",
+    payload: {}, createdBy: "dot", expiresAt: nowMs + 60_000, nowMs,
+  });
+  const dev = (await getDeviceById(env.db, deviceId))!.device;
+  const claimed = (await pollDevice(env, dev, { wait_ms: 0 })).task!;
+  const result = {
+    task_id: claimed.task_id,
+    lease_token: claimed.lease_token,
+    status: "awaiting_approval" as const,
+    summary: "Confirm payment",
+    raw_text: "waiting",
+    approval_required: { id: "approval1", summary: "Confirm payment", reason: "payment" },
+  };
+  for (const [device, update, code] of [
+    [{ ...dev, device_id: "other-device" }, result, "TASK_NOT_FOUND"],
+    [dev, { ...result, task_id: "missing-task" }, "TASK_NOT_FOUND"],
+    [dev, { ...result, lease_token: "invalid" }, "INVALID_LEASE_TOKEN"],
+    [{ ...dev, session_generation: dev.session_generation + 1 }, result, "STALE_GENERATION"],
+  ] as const) {
+    await assert.rejects(
+      submitDeviceResult(env, device, update),
+      (error: unknown) => error instanceof AppError && error.code === code,
+    );
+  }
+  assert.equal((await getTaskById(env.db, claimed.task_id))?.status, "claimed");
+  assert.equal((await getDeviceById(env.db, deviceId))?.device.pending_approval, null);
+  assert.equal((await submitDeviceResult(env, dev, result)).task_status, "awaiting_approval");
 });
 
 test("Cancellation stays pending until the phone reports its outcome and preserves late touch receipts", async () => {

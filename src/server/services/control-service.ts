@@ -15,11 +15,13 @@ import {
   countQueuedTasks,
   enqueueTask,
   getActiveTaskForDevice,
+  getOpenCompletedAt,
   getTaskById,
   requestCancelTask,
 } from "../db/tasks-repo.ts";
 import { AppError } from "../http.ts";
 import { maybeRunCleanup } from "./cleanup-service.ts";
+import { verifiedOpeningEntry } from "./opening-entry.ts";
 import {
   hydrateObservationAndScreenshot,
   getQueueWaitStatus,
@@ -110,6 +112,8 @@ export async function dispatchPhoneLook(
     settled.task.result_observation_id,
     input.include_screenshot,
     input.full,
+    settled.task.status === "failed" || settled.task.status === "timed_out" || settled.task.uncertain_execution,
+    settled.settledObservation,
   );
   return { ...settled, observation, screenshot };
 }
@@ -128,6 +132,7 @@ export async function dispatchPhoneDo(
     observation_id?: string;
     require_fresh_observation: boolean;
     actions: Array<Record<string, unknown>>;
+    opening_labels?: string[];
     app?: string | false;
     full: boolean;
     finish: boolean;
@@ -140,6 +145,8 @@ export async function dispatchPhoneDo(
   observation: ObservationRecord | null;
   screenshot: ScreenshotData | null;
   queue_wait: QueueWaitStatus | null;
+  since_open_device_result_received_ms?: number;
+  interstep_timing_unavailable?: boolean;
 }> {
   const nowMs = Date.now();
   const device = await resolveTargetDevice(env, input.device_id, true);
@@ -163,14 +170,16 @@ export async function dispatchPhoneDo(
 
   const payload: Record<string, unknown> = {
     actions: input.actions,
+    ...(input.opening_labels ? { opening_labels: input.opening_labels } : {}),
     full: input.full,
     finish: input.finish,
     want_screenshot: input.include_screenshot !== "never",
     ...(input.app !== undefined ? { app: input.app } : {}),
   };
 
+  const taskId = newId("tsk");
   const task = await enqueueTask(env.db, {
-    taskId: newId("tsk"),
+    taskId,
     deviceId: device.device_id,
     toolName: "do",
     actionSummary: summarizeActions(input.actions),
@@ -182,7 +191,7 @@ export async function dispatchPhoneDo(
     nowMs,
   });
 
-  const [, settled] = await Promise.all([
+  const [, settled, openTiming] = await Promise.all([
     recordAuditEvent(env.db, {
       deviceId: device.device_id,
       taskId: task.task_id,
@@ -192,14 +201,30 @@ export async function dispatchPhoneDo(
       nowMs,
     }),
     waitForTaskSettle(env, device.device_id, task.task_id, input.wait_timeout_ms, device.last_seen_at),
+    input.observation_id && task.task_id === taskId
+      ? getOpenCompletedAt(env.db, input.observation_id, device.device_id, actor)
+        .then((completedAt) => ({ completedAt, unavailable: false }))
+        .catch(() => ({ completedAt: null, unavailable: true }))
+      : Promise.resolve({ completedAt: null, unavailable: false }),
   ]);
+  const entry = !input.full && input.include_screenshot === "auto"
+    ? verifiedOpeningEntry(settled.task, settled.settledObservation?.observation) : undefined;
   const { observation, screenshot } = await hydrateObservationAndScreenshot(
     env,
     settled.task.result_observation_id,
-    input.include_screenshot,
+    entry ? "never" : input.include_screenshot,
     input.full,
+    settled.task.status === "failed" || settled.task.status === "timed_out" || settled.task.uncertain_execution,
+    settled.settledObservation,
   );
-  return { ...settled, observation, screenshot };
+  const sinceOpenResultReceived = openTiming.completedAt !== null && openTiming.completedAt <= task.created_at
+    ? task.created_at - openTiming.completedAt : undefined;
+  return {
+    ...settled, observation, screenshot,
+    ...(sinceOpenResultReceived !== undefined
+      ? { since_open_device_result_received_ms: sinceOpenResultReceived } : {}),
+    ...(openTiming.unavailable ? { interstep_timing_unavailable: true } : {}),
+  };
 }
 
 export async function getTaskResult(
@@ -223,6 +248,7 @@ export async function getTaskResult(
     task.result_observation_id,
     includeScreenshot,
     false,
+    task.status === "failed" || task.status === "timed_out" || task.uncertain_execution,
   );
   const queueWait = await getQueueWaitStatus(env, task);
   return { task, observation, screenshot, queue_wait: queueWait };

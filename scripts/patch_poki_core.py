@@ -3,7 +3,13 @@
 from pathlib import Path
 from shutil import copy2
 
+from patch_poki_keyboard import patch_keyboard
+from patch_poki_loading import patch_loading
+from patch_poki_nav import patch_navigation
 from patch_poki_overlay import patch_overlay
+from patch_poki_reach import patch_reach
+from patch_poki_startup import patch_startup
+from patch_poki_tap_latency import patch_tap_latency
 from patch_poki_ui import replace_once
 
 
@@ -12,12 +18,21 @@ def patch_core_safety(bridge_root: Path, poki_root: Path) -> None:
     source = core / "Sources/PokiCore"
     patch_overlay(bridge_root, core)
     patch_deadline(source / "Deadline.swift")
+    patch_transaction_activity(source / "Approvals.swift")
     computer = source / "Computer.swift"
     patch_hit_testing(computer)
     patch_observations(source)
     copy2(bridge_root / "ios/PokiAppIntegration/PokiPageVisibility.swift", source)
     copy2(bridge_root / "ios/PokiAppIntegration/PokiControlTargets.swift", source)
+    copy2(bridge_root / "ios/PokiAppIntegration/PokiSensitiveContext.swift", source)
     patch_control_targets(computer)
+    patch_sensitive_context(source)
+    patch_reach(source)
+    patch_navigation(bridge_root, core)
+    patch_loading(bridge_root, core)
+    patch_startup(bridge_root, core)
+    patch_keyboard(source)
+    patch_tap_latency(bridge_root, core)
     replace_once(
         computer,
         r"""                    return ToolResult(text: "cancelled: the caller stopped waiting before the owner answered; nothing was sent from action \(at + 1).", jpeg: nil, isError: true)""",
@@ -42,11 +57,11 @@ def patch_core_safety(bridge_root: Path, poki_root: Path) -> None:
     )
     replace_once(
         computer,
-        """            return [(down, false, .stroke)]""",
+        """            return [(down, false, .stroke, (path.0, path.1))]""",
         """            // Native lists can repeat a payment button's label in the container.
             // A web surface can hide its own controls, so keep checking it.
             if Layout.scrollers.contains(down.type), down.type != "WebView" { return [] }
-            return [(down, false, .stroke)]""",
+            return [(down, false, .stroke, (path.0, path.1))]""",
         "PokiCore scroll container",
     )
     # The release build skips tests; a full source checkout can run the same patch's regression cases.
@@ -55,6 +70,89 @@ def patch_core_safety(bridge_root: Path, poki_root: Path) -> None:
         copy2(bridge_root / "ios/PokiAppIntegration/PokiCoreSafetyTests.swift", tests)
         copy2(bridge_root / "ios/PokiAppIntegration/PokiObservationTests.swift", tests)
         copy2(bridge_root / "ios/PokiAppIntegration/PokiControlTargetTests.swift", tests)
+
+
+def patch_transaction_activity(approvals: Path) -> None:
+    replace_once(
+        approvals,
+        '"确认支付", "下单", "購買"',
+        '"确认支付", "下单", "提交订单", "提交訂單", "購買"',
+        "PokiCore order submission approval",
+    )
+    replace_once(
+        approvals,
+        r'''                // CJK words match anywhere; Latin words need whole-word boundaries.
+                if w.unicodeScalars.contains(where: { $0.value > 0x2E80 }) { return word }''',
+        r'''                // Activity counts describe past transactions; scan on for an actual action.
+                if w.unicodeScalars.contains(where: { $0.value > 0x2E80 }) {
+                    if PokiTransactionActivity.reports(lowered, word: w, range: range) {
+                        search = range.upperBound..<lowered.endIndex
+                        continue
+                    }
+                    return word
+                }''',
+        "PokiCore scan past transaction activity",
+    )
+
+
+def patch_sensitive_context(source: Path) -> None:
+    computer = source / "Computer.swift"
+    replace_once(
+        computer,
+        "        var elements: [Element]?\n    }\n\n    /// Each action of a batch",
+        "        var elements: [Element]?\n        var allElements: [Element]?\n    }\n\n    /// Each action of a batch",
+        "PokiCore retain the full tree for press classification",
+    )
+    replace_once(
+        computer,
+        "        let scan = SensitiveScan(front: elements.foreground, secureOnScreen: false, elements: listable(elements.all, screen))",
+        "        let scan = SensitiveScan(front: elements.foreground, secureOnScreen: false, elements: listable(elements.all, screen), allElements: elements.all)",
+        "PokiCore fresh press classification tree",
+    )
+    replace_once(
+        computer,
+        "            guard let reason = rules.reason(touching: press.element, typing: false, app: press.judged == .stroke ? nil : scan.front, secureOnScreen: false), reason != approved else { continue }",
+        "            guard let reason = reasonForPress(press.element, at: press.location, in: scan, rules: rules, app: press.judged == .stroke ? nil : scan.front, secureOnScreen: false), reason != approved else { continue }",
+        "PokiCore recheck the pressed action control",
+    )
+    replace_once(
+        computer,
+        "            if let r = rules.reason(touching: press.element, typing: false, app: press.judged == .stroke ? nil : scan.front, secureOnScreen: scan.secureOnScreen) { return r }",
+        "            if let r = reasonForPress(press.element, at: press.location, in: scan, rules: rules, app: press.judged == .stroke ? nil : scan.front, secureOnScreen: scan.secureOnScreen) { return r }",
+        "PokiCore check the pressed action control",
+    )
+    replace_once(
+        computer,
+        "-> [(element: Element?, atPoint: Bool, judged: Press)] {",
+        "-> [(element: Element?, atPoint: Bool, judged: Press, location: (x: Double, y: Double)?)] {",
+        "PokiCore retain the actual press location",
+    )
+    replace_once(
+        computer,
+        "-> (element: Element?, atPoint: Bool, judged: Press)? {",
+        "-> (element: Element?, atPoint: Bool, judged: Press, location: (x: Double, y: Double)?)? {",
+        "PokiCore retain tap location",
+    )
+    replace_once(
+        computer,
+        "func stroke(in spec: JSON?, _ direction: String, _ distance: String) -> [(element: Element?, atPoint: Bool, judged: Press)] {",
+        "func stroke(in spec: JSON?, _ direction: String, _ distance: String) -> [(element: Element?, atPoint: Bool, judged: Press, location: (x: Double, y: Double)?)] {",
+        "PokiCore retain stroke location",
+    )
+    replace_once(computer, "return (e, atPoint, .tap)", "return (e, atPoint, .tap, try? point(spec))", "PokiCore locate tap")
+    replace_once(computer, "return [(down, false, .stroke)]", "return [(down, false, .stroke, (path.0, path.1))]", "PokiCore locate stroke")
+    replace_once(
+        computer,
+        "return [(scan.elements == nil ? button : under(button.frame.centre), false, .button)]",
+        "return [(scan.elements == nil ? button : under(button.frame.centre), false, .button, button.frame.centre)]",
+        "PokiCore locate back button",
+    )
+    replace_once(
+        source / "Routines.swift",
+        r"                    scan = SensitiveScan(front: front, secureOnScreen: elements.contains(where: \.isSecure), elements: elements)",
+        r"                    scan = SensitiveScan(front: front, secureOnScreen: elements.contains(where: \.isSecure), elements: elements, allElements: tree.elements)",
+        "PokiCore routine press classification tree",
+    )
 
 
 def patch_control_targets(computer: Path) -> None:
@@ -120,6 +218,14 @@ def patch_control_targets(computer: Path) -> None:
 
 def patch_observations(source: Path) -> None:
     replace_once(
+        source / "Layout.swift",
+        "if textOnlyTypes.contains(e.type), outer.text.contains(e.text) { drop.insert(i); break }",
+        """// A list may repeat every item's title in one label. Keep the child's own hit area.
+            if textOnlyTypes.contains(e.type), !Layout.scrollers.contains(outer.type),
+               outer.text.contains(e.text) { drop.insert(i); break }""",
+        "PokiCore preserve individually located list items",
+    )
+    replace_once(
         source / "Core.swift",
         "    public var quickRead: @Sendable () -> Bool = { true }",
         """    public var quickRead: @Sendable () -> Bool = { true }
@@ -128,6 +234,27 @@ def patch_observations(source: Path) -> None:
         "PokiCore observation mode",
     )
     computer = source / "Computer.swift"
+    replace_once(
+        computer,
+        '        if let side = reading.foreground?.pokiPane, side == "left" || side == "right" {',
+        r'''        if config.standaloneObservations, let size, !inWorkspace {
+            header.append("viewport: \(Int(size.width.rounded()))x\(Int(size.height.rounded())) points")
+        }
+        if let side = reading.foreground?.pokiPane, side == "left" || side == "right" {''',
+        "PokiCore report the actual tap coordinate space",
+    )
+    replace_once(
+        computer,
+        "        let collapsed = Set(shown.filter",
+        """        if config.standaloneObservations, !full, reading.png != nil, shown.contains(where: { list in
+            Layout.scrollers.contains(list.type) && list.text.count > Self.textLimit &&
+                !shown.contains { list.contains($0) && !$0.text.isEmpty && list.text.contains($0.text) }
+        }) {
+            notes.append("list items have no individual controls; use the current screenshot to locate them")
+        }
+        let collapsed = Set(shown.filter""",
+        "PokiCore show the screenshot for a list exposed as a single summary",
+    )
     replace_once(
         computer,
         "        if changes, !full, !fresh {",

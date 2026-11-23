@@ -6,6 +6,7 @@ import type {
   TaskRecord,
 } from "../../shared/types.ts";
 import { AppError } from "../http.ts";
+import { verifiedOpeningEntry } from "../services/opening-entry.ts";
 import { CANCEL_ACK_PENDING_RESULT } from "../db/tasks-repo.ts";
 import type { ScreenshotData } from "../services/control-service.ts";
 import type { QueueWaitStatus } from "../services/control-helpers.ts";
@@ -24,7 +25,22 @@ function formatElementLine(el: ScreenElement): string {
   return parts.join(" ");
 }
 
-export function formatObservationText(obs: ObservationRecord): string {
+function formatRawElement(el: ScreenElement, raw: string): string {
+  const annotations: string[] = [];
+  for (const flag of el.flags ?? []) {
+    const tag = flag === "row_unverified" ? "row unverified" : flag;
+    if (!raw.includes(`[${tag}]`)) annotations.push(`[${tag}]`);
+  }
+  if (el.row_label && !raw.includes(`[row: ${el.row_label}]`)) {
+    annotations.push(`[row: ${el.row_label}]`);
+  }
+  if (el.from_picture && !raw.includes("(read from the picture)") && !raw.includes("(ocr)")) {
+    annotations.push("(ocr)");
+  }
+  return [raw, ...annotations].join(" ");
+}
+
+function formatObservationHeader(obs: ObservationRecord): string[] {
   const lines: string[] = [
     `observation_id: ${obs.observation_id}`,
     `app: ${obs.app_name ?? "unknown"}${obs.app_bundle_id ? ` (${obs.app_bundle_id})` : ""}`,
@@ -40,21 +56,80 @@ export function formatObservationText(obs: ObservationRecord): string {
   if (obs.notes.length > 0) {
     lines.push(`notes: ${obs.notes.join(" | ")}`);
   }
+  return lines;
+}
+
+export function formatObservationText(
+  obs: ObservationRecord,
+  rawElements = new Map<number, string>(),
+  rawText = "",
+  includeHeader = true,
+): string {
+  const lines = includeHeader ? formatObservationHeader(obs) : [];
   if (obs.elements.length > 0) {
     if (obs.elements.some((el) => el.flags?.includes("row_unverified"))) {
       lines.push("For [row unverified], use a point only if you can identify the intended row on the current screenshot. The numbered tap cannot confirm its target.");
     }
     lines.push("elements:");
-    for (const el of obs.elements.slice(0, 120)) {
-      lines.push(`  ${formatElementLine(el)}`);
+    for (const el of obs.elements) {
+      const raw = rawElements.get(el.ref);
+      lines.push(`  ${raw ? formatRawElement(el, raw) : formatElementLine(el)}`);
     }
-    if (obs.elements.length > 120) {
-      lines.push(`  ... (${obs.elements.length - 120} more elements omitted)`);
-    }
-  } else if (obs.visible_text) {
+  } else if (obs.visible_text && !rawText.includes(obs.visible_text)) {
     lines.push(`visible_text:\n${obs.visible_text}`);
   }
   return lines.join("\n");
+}
+
+// Poki's raw output can carry details that have not yet been added to the
+// observation schema. Reuse matching element lines, including their annotations,
+// while keeping unmatched lines and earlier delivery receipts intact.
+function separateRawElements(raw: string, obs: ObservationRecord): { text: string; elements: Map<number, string> } {
+  const elements = new Map<number, string>();
+  const indexed = new Map(obs.elements.map((el) => [el.ref, el]));
+  const boundary = raw.lastIndexOf("\n\nnow:\n");
+  const prefix = boundary >= 0 ? raw.slice(0, boundary + 7) : "";
+  const current = boundary >= 0 ? raw.slice(boundary + 7) : raw;
+  const lines = current.split("\n");
+  const start = /^[ \t]*[+~]?[ \t]*\d+[ \t]+[A-Za-z0-9_]+[ \t]+"/;
+  const record = /^\s*[+~]?\s*(\d+)\s+([A-Za-z0-9_]+)(?:\s+"(.*)")?\s+\[(-?\d+),(-?\d+),(-?\d+),(-?\d+)\](.*)$/s;
+  const remaining: string[] = [];
+  for (let index = 0; index < lines.length; index++) {
+    let line = lines[index];
+    let match = line.match(record);
+    if (!match && start.test(line)) {
+      let length = line.length;
+      for (let end = index + 1; end < lines.length && end - index <= 256 && length <= 65_536; end++) {
+        if (start.test(lines[end])) break;
+        length += lines[end].length + 1;
+        if (!lines[end].includes("]")) continue;
+        const candidate = lines.slice(index, end + 1).join("\n");
+        const candidateMatch = candidate.match(record);
+        if (!candidateMatch) continue;
+        line = candidate;
+        match = candidateMatch;
+        index = end;
+        break;
+      }
+    }
+    if (!match) {
+      remaining.push(line);
+      continue;
+    }
+    const ref = Number(match[1]);
+    const element = indexed.get(ref);
+    if (!element || elements.has(ref) || element.type !== match[2]) {
+      remaining.push(line);
+      continue;
+    }
+    const label = [element.label, element.value].filter(Boolean).join(" = ");
+    if ((match[3] ?? "") !== label || !element.frame.every((n, index) => Math.round(n) === Number(match[index + 4]))) {
+      remaining.push(line);
+      continue;
+    }
+    elements.set(ref, line.trim());
+  }
+  return { text: prefix + remaining.join("\n"), elements };
 }
 
 export function cancellationNotice(task: TaskRecord): string {
@@ -132,6 +207,8 @@ export function formatTaskOutcome(data: {
   observation: ObservationRecord | null;
   screenshot: ScreenshotData | null;
   queue_wait?: QueueWaitStatus | null;
+  since_open_device_result_received_ms?: number;
+  interstep_timing_unavailable?: boolean;
 }): CallToolResult {
   const { task, observation, screenshot } = data;
   const queueWaitMs =
@@ -142,9 +219,14 @@ export function formatTaskOutcome(data: {
       : null;
   const totalMs = Math.max(0, (task.completed_at ?? Date.now()) - task.created_at);
   const timingMs = {
+    request_received_at_ms: task.created_at,
     queue_wait_ms: queueWaitMs,
     device_exec_ms: deviceExecMs,
     total_ms: totalMs,
+    ...(task.status === "succeeded" && task.claimed_at !== null && task.completed_at !== null
+      ? { device_result_received_at_ms: task.completed_at } : {}),
+    ...(data.since_open_device_result_received_ms !== undefined
+      ? { since_open_device_result_received_ms: data.since_open_device_result_received_ms } : {}),
   };
 
   const lines: string[] = [
@@ -152,6 +234,23 @@ export function formatTaskOutcome(data: {
     `status: ${task.status}`,
     `timing_ms: queue=${queueWaitMs ?? "-"} exec=${deviceExecMs ?? "-"} total=${totalMs}`,
   ];
+  if (data.since_open_device_result_received_ms !== undefined) {
+    lines.push(`timing_ms: since_open_device_result_received=${data.since_open_device_result_received_ms} (server receipt of phone result to next request)`);
+  }
+  if (data.interstep_timing_unavailable) {
+    lines.push("timing_ms: interstep timing unavailable");
+  }
+  if (observation) {
+    lines.push(...formatObservationHeader(observation));
+    const entry = verifiedOpeningEntry(task, observation);
+    if (entry) lines.push(`Visible entry: ref ${entry.ref} "${entry.label}" (confirmed in this screenshot).`);
+    if (screenshot) {
+      lines.push("screenshot: attached for this observation");
+    } else if (observation.has_screenshot &&
+               (observation.screenshot_expires_at === null || observation.screenshot_expires_at > Date.now())) {
+      lines.push(`screenshot: available for this observation via phone_get_result(task_id="${task.task_id}", include_screenshot="always")`);
+    }
+  }
 
   if (
     (task.tool_name === "look" || task.tool_name === "do") && task.status === "succeeded" &&
@@ -225,13 +324,16 @@ export function formatTaskOutcome(data: {
       lines.push(`  [${r.index}] ${r.kind}: ${r.status}${r.detail ? ` (${r.detail})` : ""}`);
     }
   }
-  if (task.result?.raw_text) {
-    lines.push(`poki_output:\n${task.result.raw_text}`);
+  const raw = task.result?.raw_text ?? "";
+  const separated = raw && observation ? separateRawElements(raw, observation) : null;
+  if (raw) {
+    lines.push(`poki_output:\n${separated?.text ?? raw}`);
   } else if (task.result?.summary) {
     lines.push(`summary: ${task.result.summary}`);
   }
   if (observation) {
-    lines.push(formatObservationText(observation));
+    const text = formatObservationText(observation, separated?.elements, raw, false);
+    if (text) lines.push(text);
   } else if (!["succeeded", "failed", "cancelled", "timed_out"].includes(task.status)) {
     lines.push(`Poll phone_get_result(task_id="${task.task_id}") to check completion.`);
   }
@@ -271,6 +373,37 @@ export function formatTaskOutcome(data: {
       timing_ms: timingMs,
     },
     isError,
+  };
+}
+
+export function markOpeningResponsePrepared(result: CallToolResult): CallToolResult {
+  const structured = result.structuredContent;
+  const timing = structured?.timing_ms as Record<string, unknown> | undefined;
+  const received = timing?.device_result_received_at_ms;
+  if (result.isError || structured?.status !== "succeeded" || !structured.observation || typeof received !== "number") {
+    return result;
+  }
+  const prepared = Date.now();
+  const elapsed = Math.max(0, prepared - received);
+  const content = [...result.content];
+  const first = content[0];
+  if (first?.type === "text") {
+    content[0] = {
+      ...first,
+      text: `${first.text}\ntiming_ms: response_prepared_at=${prepared} device_result_to_response_prepared=${elapsed}`,
+    };
+  }
+  return {
+    ...result,
+    content,
+    structuredContent: {
+      ...structured,
+      timing_ms: {
+        ...timing,
+        response_prepared_at_ms: prepared,
+        device_result_to_response_prepared_ms: elapsed,
+      },
+    },
   };
 }
 

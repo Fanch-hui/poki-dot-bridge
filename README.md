@@ -45,6 +45,12 @@ Poki iPhone App (PokiSitesBridge + PokiAppIntegration + PokiCore)
 2. 使用你自己的 Apple 个人/开发者签名证书重签名安装到 iPhone（External 模式兼容 Shadowrocket 等外部代理，需按向导配置 `10.7.0.1/32` 路由与开发者模式/DDI；详见 [iOS 适配与安装指南](docs/ios-adapter-guide.md)）。
 3. 打开你的 Site 首页生成 12 位配对码，在手机 **Poki → Dot Bridge** 首页填入你自己的 `Site URL`、配对码与（如站点需要登录）`Site Access Token`，点击 **Pair** 并开启 **Allow Dot to Control This iPhone**。
 
+### 3. 用 Dot 操作 iPhone
+
+在 Dot 里直接说目标，例如「在京东外卖找一家咖啡店」或「在地图里看看公交路线」。Dot 在首次打开 App 或看屏时一并查询操作手册：优先用你已验证的经验，找不到时只返回当前任务的两条内置提示。手册覆盖频道内搜索、关弹窗、筛选、按标题找商品、核对规格、选择地点和预览路线。京东外卖提示会区分「秒送 → 外卖」与全站商品搜索。
+
+已知入口名称和目标页标志时，Dot 可以一次打开 App 并进入频道；如果已经在目标页，就直接返回。搜索也可以在提交后等到结果或无结果提示，再把当前画面交给 Dot。遇到弹窗、遮挡或同名入口会交回判断。
+
 ## 目录结构
 
 - `app/`：Next.js (`vinext`) App Router 路由（`/mcp`、`/.well-known/oauth-protected-resource*`、`/api/device/*`、`/api/admin/*`、`/api/health`）与精简管理界面（`/`）。

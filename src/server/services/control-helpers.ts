@@ -7,7 +7,12 @@ import type {
 } from "../../shared/types.ts";
 import type { BridgeRuntimeEnv } from "../db/d1-types.ts";
 import { getDefaultActiveDevice, getDeviceById } from "../db/devices-repo.ts";
-import { getObservationById, getScreenshotFromR2ByMeta } from "../db/observations-repo.ts";
+import {
+  getObservationById,
+  getScreenshotFromR2ByMeta,
+  getTaskWithSettledObservation,
+  type ObservationWithMeta,
+} from "../db/observations-repo.ts";
 import { expireStaleTasksAndLeases } from "../db/task-lease-repo.ts";
 import { getActiveTaskForDevice, getTaskById } from "../db/tasks-repo.ts";
 import { AppError } from "../http.ts";
@@ -80,14 +85,16 @@ export function shouldAttachScreenshot(
   mode: IncludeScreenshotMode,
   obs: ObservationRecord | null,
   fullMode = false,
+  failed = false,
 ): boolean {
   if (!obs || !obs.has_screenshot) return false;
   if (mode === "always") return true;
   if (mode === "never") return false;
-  if (fullMode) return true;
+  if (fullMode || failed) return true;
   if (obs.elements.length === 0) return true;
   if (obs.elements.some((e) =>
-    e.from_picture || e.type === "WebView" || e.flags?.includes("collapsed") || e.flags?.includes("row_unverified"),
+    e.from_picture || e.type === "WebView" || e.flags?.includes("collapsed") ||
+    e.flags?.includes("row_unverified") || e.flags?.includes("covered"),
   )) {
     return true;
   }
@@ -137,7 +144,7 @@ export async function waitForTaskSettle(
   taskId: string,
   waitTimeoutMs: number,
   lastSeenAt: number | null,
-): Promise<{ task: TaskRecord; queue_wait: QueueWaitStatus | null }> {
+): Promise<{ task: TaskRecord; queue_wait: QueueWaitStatus | null; settledObservation?: ObservationWithMeta | null }> {
   const clamped = Math.min(TASK_LIMITS.MAX_WAIT_TIMEOUT_MS, Math.max(0, waitTimeoutMs));
   const startedMs = Date.now();
   const deadline = startedMs + clamped;
@@ -148,14 +155,15 @@ export async function waitForTaskSettle(
   let queueWait: QueueWaitStatus | null = null;
   while (true) {
     const nowMs = Date.now();
-    let task = await getTaskById(env.db, taskId);
-    if (!task) throw new AppError(404, "TASK_NOT_FOUND", "Task not found");
+    const found = await getTaskWithSettledObservation(env.db, taskId);
+    if (!found) throw new AppError(404, "TASK_NOT_FOUND", "Task not found");
+    let task = found.task;
 
     const isSettled = (t: TaskRecord) =>
       t.status === "awaiting_approval" ||
       ["succeeded", "failed", "cancelled", "timed_out"].includes(t.status);
 
-    if (isSettled(task)) return { task, queue_wait: null };
+    if (isSettled(task)) return { ...found, queue_wait: null };
 
     if (
       task.expires_at <= nowMs ||
@@ -196,12 +204,14 @@ export async function hydrateObservationAndScreenshot(
   observationId: string | null,
   includeScreenshot: IncludeScreenshotMode,
   fullMode = false,
+  failed = false,
+  settledObservation?: ObservationWithMeta | null,
 ): Promise<{ observation: ObservationRecord | null; screenshot: ScreenshotData | null }> {
   if (!observationId) return { observation: null, screenshot: null };
-  const found = await getObservationById(env.db, observationId);
+  const found = settledObservation === undefined ? await getObservationById(env.db, observationId) : settledObservation;
   if (!found) return { observation: null, screenshot: null };
   let screenshot: ScreenshotData | null = null;
-  if (shouldAttachScreenshot(includeScreenshot, found.observation, fullMode)) {
+  if (shouldAttachScreenshot(includeScreenshot, found.observation, fullMode, failed)) {
     const img = await getScreenshotFromR2ByMeta(env.bucket, {
       r2Key: found.r2Key,
       mimeType: found.observation.screenshot_mime,

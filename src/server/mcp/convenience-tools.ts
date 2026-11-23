@@ -8,7 +8,9 @@ import type { BridgeRuntimeEnv } from "../db/d1-types.ts";
 import { getObservationScreenSize } from "../db/observations-repo.ts";
 import { resolveTargetDevice } from "../services/control-helpers.ts";
 import { dispatchPhoneDo } from "../services/control-service.ts";
-import { formatTaskOutcome } from "./formatters.ts";
+import { openingLabels } from "../services/opening-entry.ts";
+import { formatTaskOutcome, markOpeningResponsePrepared } from "./formatters.ts";
+import { attachOpeningGuide, goalKeySchema } from "./playbook-tools.ts";
 
 export type ToolWrapper = (fn: () => Promise<CallToolResult>) => Promise<CallToolResult>;
 
@@ -53,6 +55,7 @@ export function registerConvenienceTools(
     observation_id?: string;
     require_fresh_observation: boolean;
     actions: Array<Record<string, unknown>>;
+    opening_labels?: string[];
     include_screenshot: IncludeScreenshotMode;
     wait_timeout_ms?: number;
   }) =>
@@ -148,7 +151,7 @@ export function registerConvenienceTools(
     "phone_type",
     {
       title: "Type Text",
-      description: "Type text into the focused field or a referenced element ref, optionally pressing return.",
+      description: "Type into the focused field or a referenced input. For a search, submit with result_texts to wait on-device for a known result or empty-state label.",
       inputSchema: {
         ...commonOpts,
         text: z.string().min(1),
@@ -156,11 +159,19 @@ export function registerConvenienceTools(
         clear: z.boolean().optional(),
         via: z.enum(["keys", "paste"]).optional(),
         submit: z.boolean().optional().default(false),
+        result_texts: z.array(z.string().trim().min(1).max(120)).min(1).max(6).optional()
+          .describe("With submit=true and a current editable field ref on Poki 1.0.1+, wait for any of these visible result-page labels, distinct from the typed query."),
       },
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     },
     (args) =>
       wrapTool(async () => {
+        if (args.result_texts) {
+          if (!args.submit) throw new Error("result_texts requires submit=true; nothing was sent.");
+          if (args.ref === undefined) throw new Error("result_texts requires the current input field ref; nothing was sent.");
+          const search = { text: args.text, ref: args.ref, clear: args.clear, via: args.via, result_texts: args.result_texts };
+          return runDo({ ...args, require_fresh_observation: true, actions: [{ search_submit: search }] });
+        }
         const actions: Array<Record<string, unknown>> = [
           { type: args.text, ...(args.ref !== undefined ? { ref: args.ref } : {}), ...(args.clear !== undefined ? { clear: args.clear } : {}), ...(args.via !== undefined ? { via: args.via } : {}) },
         ];
@@ -173,13 +184,32 @@ export function registerConvenienceTools(
     "phone_open_app",
     {
       title: "Open App",
-      description: "Open an iOS app by name or bundle ID and return its screen. On a new task with a known goal, call phone_playbook_lookup first.",
-      inputSchema: { device_id: commonOpts.device_id, app: z.string().min(1), fresh: z.boolean().optional().default(false), include_screenshot: commonOpts.include_screenshot, wait_timeout_ms: commonOpts.wait_timeout_ms },
+      description: "Open an app and return its current screen. For a known low-risk destination, locate the entry on-device and stop on arrival or ambiguity. Include goal_key for a playbook tip with the first result.",
+      inputSchema: {
+        device_id: commonOpts.device_id,
+        app: z.string().trim().min(1),
+        fresh: z.boolean().optional().default(false),
+        destination: z.object({
+          label: z.string().trim().min(1).max(120).describe("Exact navigation entry label on the opening screen (Poki 1.0.1+)."),
+          type: z.string().trim().min(1).max(64).optional(),
+          ready_text: z.string().trim().min(1).max(120).describe("Distinct landmark specific to the destination page, not the entry label."),
+        }).optional(),
+        goal_key: goalKeySchema.optional(),
+        include_screenshot: commonOpts.include_screenshot,
+        wait_timeout_ms: commonOpts.wait_timeout_ms,
+      },
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     },
-    (args) =>
-      wrapTool(async () =>
-        runDo({ ...args, require_fresh_observation: false, actions: [{ launch: args.fresh ? { bundle: args.app, fresh: true } : args.app }] }),
-      ),
+    ({ app, fresh, destination, goal_key, ...opts }) => wrapTool(async () => {
+      if (destination && destination.label.toLowerCase() === destination.ready_text.toLowerCase()) {
+        throw new Error("Choose a ready_text specific to the destination page; nothing was sent.");
+      }
+      const action = destination
+        ? { path: { goal: "Open destination", steps: [{ navigate: { app, destination, ...(fresh ? { fresh } : {}) } }] } }
+        : { launch: fresh ? { bundle: app, fresh } : app };
+      const labels = !destination && opts.include_screenshot === "auto" ? openingLabels(app, goal_key) : undefined;
+      const pending = runDo({ ...opts, require_fresh_observation: false, actions: [action], opening_labels: labels });
+      return markOpeningResponsePrepared(await attachOpeningGuide(pending, env.db, actor, app, goal_key));
+    }),
   );
 }

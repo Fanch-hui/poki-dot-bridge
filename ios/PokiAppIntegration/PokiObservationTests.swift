@@ -5,6 +5,24 @@ import XCTest
 final class PokiObservationTests: XCTestCase {
     private let pageFrame: [Double] = [0, 60, 390, 740]
 
+    func testListSummaryPreservesLocatedTitlesAndShowsThePictureForMissingItems() async {
+        let wda = FakeWDA()
+        let (core, _, _) = makeCore(wda) { $0.standaloneObservations = true }
+        let summary = String(repeating: "House Blend, Green Tea, ", count: 20)
+        let sort = Node("Button", "Sort by distance", [20, 80, 130, 40])
+        let item = Node("StaticText", "Green Tea", [30, 200, 90, 30])
+        wda.tree([Node("Table", summary, pageFrame, [sort, item])])
+        let located = await core.call("look", [:])
+        XCTAssertTrue(located.text.contains("viewport: 390x844 points"), located.text)
+        XCTAssertTrue(located.text.contains("StaticText \"Green Tea\" [30,200,90,30]"), located.text)
+        XCTAssertFalse(located.text.contains("list items have no individual controls"), located.text)
+
+        wda.tree([Node("Table", summary, pageFrame, [sort])])
+        let aggregate = await core.call("look", [:])
+        XCTAssertTrue(aggregate.text.contains("use the current screenshot"), aggregate.text)
+        XCTAssertNotNil(aggregate.jpeg)
+    }
+
     func testCoveredEditorDoesNotSupplyActionableControlsOnTheHomePage() async {
         let wda = FakeWDA()
         let host = FakeHost()
@@ -100,6 +118,82 @@ final class PokiObservationTests: XCTestCase {
         XCTAssertFalse(result.isError, result.text)
         XCTAssertTrue(result.text.contains("TextField \"Title = 你好\""), result.text)
         XCTAssertTrue(result.text.contains("Button \"换行\""), result.text)
+    }
+
+    func testReturnUsesTheVisibleKeyboardInsteadOfAnOffscreenDuplicate() async {
+        let wda = FakeWDA()
+        wda.tree([
+            Node("TextField", "搜索", [20, 80, 280, 44], value: "咖啡"),
+            Node("Keyboard", nil, [0, 500, 390, 344], [
+                Node("Button", "搜索", [300, 800, 80, 40]),
+            ]),
+            Node("Keyboard", nil, [0, 900, 390, 344], [
+                Node("Button", "搜索", [300, 1100, 80, 40]),
+            ]),
+        ])
+        let (core, _, _) = makeCore(wda) { $0.standaloneObservations = true }
+        _ = await core.call("look", [:])
+
+        let result = await core.call("do", ["actions": [["key": "return"]]])
+
+        XCTAssertFalse(result.isError, result.text)
+        XCTAssertEqual(wda.bodies("POST /wda/tap").first?["y"]?.double, 820)
+        XCTAssertTrue(wda.bodies("POST /wda/keys").isEmpty, result.text)
+    }
+
+    func testReturnStopsWhenTheOnlyKeyboardKeyIsOffscreen() async {
+        let wda = FakeWDA()
+        wda.tree([
+            Node("TextField", "搜索", [20, 80, 280, 44], value: "咖啡"),
+            Node("Keyboard", nil, [0, 900, 390, 344], [
+                Node("Button", "搜索", [300, 1100, 80, 40]),
+            ]),
+        ])
+        let (core, _, _) = makeCore(wda) { $0.standaloneObservations = true }
+        _ = await core.call("look", [:])
+
+        let result = await core.call("do", ["actions": [["key": "return"]]])
+
+        XCTAssertTrue(result.isError, result.text)
+        XCTAssertTrue(result.text.contains("outside the visible screen"), result.text)
+        XCTAssertTrue(wda.bodies("POST /wda/tap").isEmpty, result.text)
+        XCTAssertTrue(wda.bodies("POST /wda/keys").isEmpty, result.text)
+    }
+
+    func testReturnTouchesTheVisiblePartOfAClippedKeyboardKey() async {
+        let wda = FakeWDA()
+        wda.tree([
+            Node("TextField", "搜索", [20, 80, 280, 44], value: "咖啡"),
+            Node("Keyboard", nil, [0, 500, 390, 380], [
+                Node("Button", "搜索", [300, 820, 80, 60]),
+            ]),
+        ])
+        let (core, _, _) = makeCore(wda) { $0.standaloneObservations = true }
+        _ = await core.call("look", [:])
+
+        let result = await core.call("do", ["actions": [["key": "return"]]])
+
+        XCTAssertFalse(result.isError, result.text)
+        XCTAssertEqual(wda.bodies("POST /wda/tap").first?["y"]?.double, 832)
+    }
+
+    func testReturnChecksTheCurrentScreenSizeBeforeTapping() async {
+        let wda = FakeWDA()
+        wda.tree([
+            Node("TextField", "搜索", [20, 80, 280, 44], value: "咖啡"),
+            Node("Keyboard", nil, [0, 500, 390, 344], [
+                Node("Button", "搜索", [300, 800, 80, 40]),
+            ]),
+        ])
+        let (core, _, _) = makeCore(wda) { $0.standaloneObservations = true }
+        _ = await core.call("look", [:])
+        wda.set("GET /wda/screen") { _ in (200, ["value": ["screenSize": ["width": 390, "height": 700]]]) }
+
+        let result = await core.call("do", ["actions": [["key": "return"]]])
+
+        XCTAssertTrue(result.isError, result.text)
+        XCTAssertTrue(wda.bodies("POST /wda/tap").isEmpty, result.text)
+        XCTAssertTrue(wda.bodies("POST /wda/keys").isEmpty, result.text)
     }
 
     func testPictureChangeDuringTheTreeReadRefreshesTheControlsInTheSameResult() async {

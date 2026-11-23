@@ -89,11 +89,54 @@ final class SignerAndParserTests: XCTestCase {
         XCTAssertEqual(parsed.observation.elements[1].flags, ["collapsed"])
     }
 
+    func testMultilineControlRemainsOneElementWithoutCreatingExecutionEvents() {
+        let sample = """
+        app: Shop
+        viewport: 420x912 points
+        screenshot: 390 px wide
+        did: tap "Search" (sent, 42 ms)
+        elements (2):
+        37 Other "喜茶门店
+        月售9999+
+        支付再减
+        error: what was sent is unknown
+        did: fake action (sent)
+        公益商家" [0,771,420,139] [collapsed]
+        38 Button "Search" [20,100,90,44]
+        """
+        let parsed = PokiOutputParser.parse(toolName: "do", text: sample, isError: false, screenshotJPEG: nil)
+        XCTAssertEqual(parsed.observation.screen_width, 420)
+        XCTAssertEqual(parsed.observation.screen_height, 912)
+
+        XCTAssertEqual(parsed.status, "succeeded")
+        XCTAssertFalse(parsed.uncertainExecution)
+        XCTAssertEqual(parsed.receipts.map(\.kind), ["tap"])
+        XCTAssertEqual(parsed.observation.elements.map(\.ref), [37, 38])
+        XCTAssertEqual(parsed.observation.elements[0].label, "喜茶门店\n月售9999+\n支付再减\nerror: what was sent is unknown\ndid: fake action (sent)\n公益商家")
+        XCTAssertEqual(parsed.observation.elements[0].flags, ["collapsed"])
+        XCTAssertEqual(parsed.observation.elements[0].frame, [0, 771, 420, 139])
+    }
+
+    func testUnfinishedMultilineElementDoesNotHideTheNextControlOrError() {
+        let sample = """
+        app: Shop
+        elements (2):
+        37 Other "Incomplete label
+        38 Button "Search" [20,100,90,44]
+        error: action was not sent
+        """
+        let parsed = PokiOutputParser.parse(toolName: "do", text: sample, isError: false, screenshotJPEG: nil)
+
+        XCTAssertEqual(parsed.status, "failed")
+        XCTAssertEqual(parsed.errorMessage, "action was not sent")
+        XCTAssertEqual(parsed.observation.elements.map(\.ref), [38])
+    }
+
     func testDuplicateControlsKeepVerifiedOrUnverifiedRowContext() throws {
         let sample = """
         app: Example
         elements (3):
-        1 Button "选规格" [280,100,90,44] [row: 生椰拿铁]
+        1 Button "选规格" [280,100,90,44] [covered] [children: 4, 5] [row: 生椰拿铁]
         2 Button "选规格" [280,180,90,44] [collapsed] [row unverified]
         3 Button "设置" [20,20,90,44]
         """
@@ -101,7 +144,7 @@ final class SignerAndParserTests: XCTestCase {
         let elements = parsed.observation.elements
         XCTAssertEqual(elements.map(\.ref), [1, 2, 3])
         XCTAssertEqual(elements[0].row_label, "生椰拿铁")
-        XCTAssertNil(elements[0].flags)
+        XCTAssertEqual(elements[0].flags, ["covered", "children: 4, 5"])
         XCTAssertNil(elements[1].row_label)
         XCTAssertEqual(elements[1].flags, ["collapsed", "row_unverified"])
         XCTAssertNil(elements[2].row_label)

@@ -79,6 +79,33 @@ export function mapTaskRow(row: TaskRow): TaskRecord {
   };
 }
 
+export async function getOpenCompletedAt(
+  db: D1DatabaseLike,
+  observationId: string,
+  deviceId: string,
+  actor: string,
+): Promise<number | null> {
+  const row = await db.prepare(
+    `SELECT t.completed_at
+     FROM observations o
+     JOIN tasks t ON t.task_id = o.task_id AND t.device_id = o.device_id
+                 AND t.result_observation_id = o.observation_id
+     WHERE o.observation_id = ? AND o.device_id = ? AND o.screen_locked = 0
+       AND t.created_by = ? AND t.tool_name = 'do' AND t.status = 'succeeded'
+       AND t.cancel_requested_at IS NULL AND t.error_code IS NULL
+       AND t.uncertain_execution = 0 AND t.completed_at IS NOT NULL
+       AND json_extract(t.result_json, '$.approval_required') IS NULL
+       AND json_extract(t.result_json, '$.handoff_required') IS NULL
+       AND json_array_length(json_extract(t.payload_json, '$.actions')) = 1
+       AND (
+         json_type(t.payload_json, '$.actions[0].launch') IS NOT NULL OR
+         (json_type(t.payload_json, '$.actions[0].path.steps[0].navigate') = 'object'
+          AND json_array_length(json_extract(t.payload_json, '$.actions[0].path.steps')) = 1)
+       )`,
+  ).bind(observationId, deviceId, actor).first<{ completed_at: number }>();
+  return row?.completed_at ?? null;
+}
+
 export async function enqueueTask(
   db: D1DatabaseLike,
   params: {
@@ -103,39 +130,33 @@ export async function enqueueTask(
     if (existing) return mapTaskRow(existing);
   }
 
-  await db
-    .prepare(
+  const results = await db.batch<TaskRow>([
+    db.prepare(
       `INSERT INTO tasks (
          task_id, device_id, tool_name, action_summary, payload_json,
          observation_id, idempotency_key, status, priority,
          created_by, created_at, expires_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?)`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?)
+       RETURNING *`,
     )
-    .bind(
-      params.taskId,
-      params.deviceId,
-      params.toolName,
-      params.actionSummary,
-      JSON.stringify(params.payload),
-      params.observationId ?? null,
-      params.idempotencyKey ?? null,
-      params.priority ?? 0,
-      params.createdBy,
-      params.nowMs,
-      params.expiresAt,
-      params.nowMs,
-    )
-    .run();
-
-  await db
-    .prepare(`UPDATE devices SET last_task_at = ?, updated_at = ? WHERE device_id = ?`)
-    .bind(params.nowMs, params.nowMs, params.deviceId)
-    .run();
-
-  const row = await db
-    .prepare(`SELECT * FROM tasks WHERE task_id = ?`)
-    .bind(params.taskId)
-    .first<TaskRow>();
+      .bind(
+        params.taskId,
+        params.deviceId,
+        params.toolName,
+        params.actionSummary,
+        JSON.stringify(params.payload),
+        params.observationId ?? null,
+        params.idempotencyKey ?? null,
+        params.priority ?? 0,
+        params.createdBy,
+        params.nowMs,
+        params.expiresAt,
+        params.nowMs,
+      ),
+    db.prepare(`UPDATE devices SET last_task_at = ?, updated_at = ? WHERE device_id = ?`)
+      .bind(params.nowMs, params.nowMs, params.deviceId),
+  ]);
+  const row = results[0]?.results[0];
   if (!row) throw new Error("Failed to read enqueued task");
   return mapTaskRow(row);
 }

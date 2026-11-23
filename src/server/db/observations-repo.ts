@@ -1,6 +1,7 @@
-import type { ObservationRecord, ScreenElement } from "../../shared/types.ts";
+import type { ObservationRecord, ScreenElement, TaskRecord } from "../../shared/types.ts";
 import { base64ToBytes, bytesToBase64 } from "../crypto.ts";
 import type { D1DatabaseLike, R2BucketLike } from "./d1-types.ts";
+import { mapTaskRow, type TaskRow } from "./tasks-repo.ts";
 
 interface ObservationRow {
   observation_id: string;
@@ -23,6 +24,11 @@ interface ObservationRow {
   screenshot_bytes: number | null;
   screenshot_expires_at: number | null;
   created_at: number;
+}
+
+export interface ObservationWithMeta {
+  observation: ObservationRecord;
+  r2Key: string | null;
 }
 
 function parseJson<T>(raw: string, fallback: T): T {
@@ -201,7 +207,7 @@ export async function getObservationScreenSize(
 export async function getObservationById(
   db: D1DatabaseLike,
   observationId: string,
-): Promise<{ observation: ObservationRecord; r2Key: string | null } | null> {
+): Promise<ObservationWithMeta | null> {
   const row = await db
     .prepare(`SELECT * FROM observations WHERE observation_id = ?`)
     .bind(observationId)
@@ -210,6 +216,42 @@ export async function getObservationById(
   return {
     observation: mapObservationRow(row),
     r2Key: row.screenshot_r2_key,
+  };
+}
+
+export async function getTaskWithSettledObservation(
+  db: D1DatabaseLike,
+  taskId: string,
+): Promise<{ task: TaskRecord; settledObservation?: ObservationWithMeta | null } | null> {
+  const row = await db.prepare(
+    `SELECT t.*,
+       CASE WHEN t.status IN ('awaiting_approval', 'succeeded', 'failed', 'cancelled', 'timed_out')
+         THEN (SELECT json_object(
+           'observation_id', o.observation_id, 'device_id', o.device_id, 'task_id', o.task_id,
+           'app_bundle_id', o.app_bundle_id, 'app_name', o.app_name,
+           'screen_width', o.screen_width, 'screen_height', o.screen_height,
+           'coordinate_unit', o.coordinate_unit, 'screen_locked', o.screen_locked,
+           'screen_changed', o.screen_changed, 'screen_hash', o.screen_hash,
+           'elements_json', o.elements_json, 'visible_text', o.visible_text,
+           'raw_text', o.raw_text, 'notes_json', o.notes_json,
+           'screenshot_r2_key', o.screenshot_r2_key, 'screenshot_mime', o.screenshot_mime,
+           'screenshot_bytes', o.screenshot_bytes, 'screenshot_expires_at', o.screenshot_expires_at,
+           'created_at', o.created_at
+         ) FROM observations o WHERE o.observation_id = t.result_observation_id)
+       END AS settled_observation_json
+     FROM tasks t WHERE t.task_id = ?`,
+  ).bind(taskId).first<TaskRow & { settled_observation_json: string | null }>();
+  if (!row) return null;
+  const task = mapTaskRow(row);
+  if (!["awaiting_approval", "succeeded", "failed", "cancelled", "timed_out"].includes(task.status)) {
+    return { task };
+  }
+  const observationRow = row.settled_observation_json ? JSON.parse(row.settled_observation_json) as ObservationRow : null;
+  return {
+    task,
+    settledObservation: observationRow
+      ? { observation: mapObservationRow(observationRow), r2Key: observationRow.screenshot_r2_key }
+      : null,
   };
 }
 

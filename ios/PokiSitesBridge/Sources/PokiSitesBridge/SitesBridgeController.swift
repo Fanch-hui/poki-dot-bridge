@@ -566,8 +566,10 @@ public actor SitesBridgeController {
             screenshotJPEG: reply.screenshotJPEG
         )
         let runner = PokiRunnerStateMapper.normalize(await executor.currentRunnerState())
+        var observation = pendingApproval == nil && pendingHandoff == nil && !execution.isCancelled
+            ? OpeningEntryEvidence.applying(to: parsed, task: task)
+            : parsed.observation
         let uploadReadyAt = clock.now
-        var observation = parsed.observation
         if startedAt.duration(to: uploadReadyAt) >= .seconds(5) {
             let coreMs = Self.milliseconds(startedAt.duration(to: replyAt))
             let resultMs = Self.milliseconds(replyAt.duration(to: uploadReadyAt))

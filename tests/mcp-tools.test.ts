@@ -3,6 +3,8 @@ import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { MOCK_JPEG_BASE64, MockIPhone } from "../scripts/mock-iphone.ts";
+import { getOpenCompletedAt, getTaskById } from "../src/server/db/tasks-repo.ts";
+import { resolveRuntimeEnv } from "../src/server/env.ts";
 import type { ObservationRecord } from "../src/shared/types.ts";
 import { startLocalBridgeServer } from "../src/server/local/dev-server.ts";
 
@@ -86,7 +88,7 @@ test("Sites 2026-07-28 discovery, tools/list, and tools/call include full metada
     assert.equal(typeof discovery.result.instructions, "string");
     assert.match(
       String(discovery.result.instructions),
-      /once per new user task[^.]*phone_playbook_lookup[^.]*before the first phone action/i,
+      /first phone_open_app or phone_look[^.]*goal_key[^.]*same response/i,
     );
     assert.match(String(discovery.result.instructions), /after the whole iPhone task ends[^.]*phone_finish_task before replying/i);
     assert.match(String(discovery.result.instructions), /include one lesson only[^.]*exact visible success label/i);
@@ -199,6 +201,59 @@ test("One closeout requests standby and can save a verified lesson from an earli
   }
 });
 
+test("The first action using an opened screen reports its server-side interstep interval", async () => {
+  const { srv, phone, mcp } = await createConnectedMcpHarness();
+  try {
+    const opened = await invokeTool(mcp, "phone_open_app", { app: "Settings", include_screenshot: "never" });
+    assert.equal(opened.structured.status, "succeeded");
+    const observation = opened.structured.observation as ObservationRecord;
+    const { db } = await resolveRuntimeEnv();
+    const openTask = (await getTaskById(db, String(opened.structured.task_id)))!;
+    assert.equal(await getOpenCompletedAt(db, observation.observation_id, openTask.device_id, openTask.created_by), openTask.completed_at);
+    assert.equal(await getOpenCompletedAt(db, observation.observation_id, openTask.device_id, "another-actor"), null);
+    assert.equal(await getOpenCompletedAt(db, observation.observation_id, "another-device", openTask.created_by), null);
+
+    const next = await invokeTool(mcp, "phone_do", {
+      observation_id: observation.observation_id,
+      actions: [{ tap: 2 }],
+      idempotency_key: "first-action-after-open",
+      include_screenshot: "never",
+    });
+    const nextTask = (await getTaskById(db, String(next.structured.task_id)))!;
+    const gap = nextTask.created_at - openTask.completed_at!;
+    const openingTiming = opened.structured.timing_ms as Record<string, number>;
+    const nextTiming = next.structured.timing_ms as Record<string, number>;
+    assert.equal(openingTiming.device_result_received_at_ms, openTask.completed_at);
+    assert.ok(openingTiming.response_prepared_at_ms >= openingTiming.device_result_received_at_ms);
+    assert.equal(openingTiming.device_result_to_response_prepared_ms,
+      openingTiming.response_prepared_at_ms - openingTiming.device_result_received_at_ms);
+    assert.equal(nextTiming.request_received_at_ms, nextTask.created_at);
+    assert.equal(nextTiming.since_open_device_result_received_ms, gap);
+    assert.match(next.content[0].text ?? "", new RegExp(`since_open_device_result_received=${gap} \\(server receipt of phone result to next request\\)`));
+
+    const retry = await invokeTool(mcp, "phone_do", {
+      observation_id: observation.observation_id,
+      require_fresh_observation: false,
+      actions: [{ tap: 2 }],
+      idempotency_key: "first-action-after-open",
+      include_screenshot: "never",
+    });
+    assert.equal(retry.structured.task_id, next.structured.task_id);
+    assert.equal((retry.structured.timing_ms as Record<string, number>).since_open_device_result_received_ms, undefined);
+
+    const looked = await invokeTool(mcp, "phone_look", { include_screenshot: "never" });
+    const lookObservation = looked.structured.observation as ObservationRecord;
+    const later = await invokeTool(mcp, "phone_tap", {
+      observation_id: lookObservation.observation_id, ref: 1, include_screenshot: "never",
+    });
+    assert.equal((later.structured.timing_ms as Record<string, number>).since_open_device_result_received_ms, undefined);
+  } finally {
+    await mcp.close().catch(() => {});
+    await phone.stop();
+    await srv.close();
+  }
+});
+
 test("Finish is skipped while a later task awaits approval", async () => {
   const { srv, phone, mcp } = await createConnectedMcpHarness();
   try {
@@ -213,6 +268,40 @@ test("Finish is skipped while a later task awaits approval", async () => {
     assert.equal((await invokeTool(mcp, "phone_finish_task", { last_task_id: first.structured.task_id })).structured.status, "skipped");
     assert.equal((await invokeTool(mcp, "phone_finish_task", { last_task_id: approval.structured.task_id })).structured.status, "skipped");
     assert.equal(phone.standbyRequests, 0);
+  } finally {
+    await mcp.close().catch(() => {});
+    await phone.stop();
+    await srv.close();
+  }
+});
+
+test("Phone handbook returns one concise built-in guide for a common goal", async () => {
+  const { srv, phone, mcp } = await createConnectedMcpHarness();
+  try {
+    for (const goal of [
+      "search", "search-products", "dismiss-popup", "filter-results", "open-list-item",
+      "select-location", "choose-product-option", "preview-route",
+    ]) {
+      const found = await invokeTool(mcp, "phone_playbook_lookup", { app: "Any App", goal_key: goal });
+      const guidance = found.structured.guidance as { source: string; steps: string[] };
+      assert.equal(found.structured.entry, null);
+      assert.equal(guidance.source, "built_in");
+      assert.equal(guidance.steps.length, 2);
+      assert.match(found.content[0].text ?? "", /General built-in guidance/);
+    }
+    const noApp = await invokeTool(mcp, "phone_playbook_lookup", { goal_key: "search" });
+    assert.equal((noApp.structured.guidance as { source: string }).source, "built_in");
+    assert.match(noApp.content[0].text ?? "", /Confirm the app, channel and store scope/);
+    const jd = await invokeTool(mcp, "phone_playbook_lookup", { app: "JD", goal_key: "search-takeout" });
+    assert.match(jd.content[0].text ?? "", /秒送 then 外卖/);
+    const otherApp = await invokeTool(mcp, "phone_playbook_lookup", { app: "Other App", goal_key: "search-takeout" });
+    assert.match(otherApp.content[0].text ?? "", /Open the takeout channel first/);
+    for (const guide of [jd, otherApp]) {
+      assert.match(guide.content[0].text ?? "", /product card under the matching store and branch in search results/);
+    }
+    const unknown = await invokeTool(mcp, "phone_playbook_lookup", { goal_key: "open-wifi" });
+    assert.equal(unknown.structured.entry, null);
+    assert.equal(unknown.structured.guidance, undefined);
   } finally {
     await mcp.close().catch(() => {});
     await phone.stop();
@@ -268,6 +357,18 @@ test("Phone handbook returns and replaces only the matching verified experience"
     const saved = await invokeTool(mcp, "phone_playbook_learn", lesson);
     assert.equal(saved.isError, false);
     assert.equal(saved.structured.saved, true);
+    const commonGoal = { ...lesson, goal_key: "search" };
+    const fallback = await invokeTool(mcp, "phone_playbook_lookup", { app: commonGoal.app, goal_key: commonGoal.goal_key });
+    assert.equal((fallback.structured.guidance as { source: string }).source, "built_in");
+    assert.equal((await invokeTool(mcp, "phone_playbook_learn", commonGoal)).structured.saved, true);
+    const preferred = await invokeTool(mcp, "phone_playbook_lookup", { app: commonGoal.app, goal_key: commonGoal.goal_key });
+    assert.equal(preferred.structured.source, "verified");
+    assert.equal(preferred.structured.guidance, undefined);
+    assert.deepEqual(preferred.structured.entry, {
+      when: lesson.when, steps: lesson.steps, success_marker: lesson.success_marker,
+    });
+    const looked = await invokeTool(mcp, "phone_look", { goal_key: commonGoal.goal_key, include_screenshot: "never" });
+    assert.deepEqual(looked.structured.playbook, preferred.structured);
     const found = await invokeTool(mcp, "phone_playbook_lookup", { app: "  ＳＥＴＴＩＮＧＳ  ", goal_key: target.goal_key });
     assert.deepEqual(found.structured.entry, {
       when: lesson.when, steps: lesson.steps, success_marker: lesson.success_marker,
@@ -420,6 +521,42 @@ test("Unauthorized POST /mcp returns 401 and logs non-secret mcp_auth_rejected a
     assert.ok((rejected.detail.header_names as string[]).includes("authorization"));
     assert.equal(JSON.stringify(data.audit).includes(leakedSecret), false);
   } finally {
+    await srv.close();
+  }
+});
+
+test("opening guidance and guarded navigation or search use one phone job", async () => {
+  const { srv, phone, mcp } = await createConnectedMcpHarness();
+  try {
+    await phone.stop();
+    const { db } = await resolveRuntimeEnv();
+    const destination = { label: "Channels", type: "Button", ready_text: "Browse channels" };
+    const opened = await invokeTool(mcp, "phone_open_app", {
+      app: "Shop", goal_key: "search", destination, wait_timeout_ms: 0,
+    });
+    assert.equal(opened.isError, false);
+    assert.equal((opened.structured.playbook as { guidance: { source: string } }).guidance.source, "built_in");
+    const launch = await getTaskById(db, String(opened.structured.task_id));
+    assert.deepEqual(launch?.payload.actions, [{
+      path: { goal: "Open destination", steps: [{ navigate: { app: "Shop", destination } }] },
+    }]);
+    const search = { text: "grapes", ref: 2, result_texts: ["Results", "No results"] };
+    const submitted = await invokeTool(mcp, "phone_type", { ...search, submit: true, wait_timeout_ms: 0 });
+    const task = await getTaskById(db, String(submitted.structured.task_id));
+    assert.deepEqual(task?.payload.actions, [{ search_submit: search }]);
+    const invalid = await invokeTool(mcp, "phone_type", search);
+    assert.equal(invalid.isError, true);
+    assert.match(invalid.content[0]?.text ?? "", /requires submit=true/);
+    const missingField = await invokeTool(mcp, "phone_type", { text: "tea", submit: true, result_texts: ["No results"] });
+    assert.equal(missingField.isError, true);
+    assert.match(missingField.content[0]?.text ?? "", /current input field ref/);
+    const invalidDestination = await invokeTool(mcp, "phone_open_app", {
+      app: "Shop", destination: { label: "Shop", ready_text: "Shop" },
+    });
+    assert.equal(invalidDestination.isError, true);
+  } finally {
+    await phone.stop();
+    await mcp.close();
     await srv.close();
   }
 });
