@@ -9,7 +9,7 @@ import { getObservationScreenSize } from "../db/observations-repo.ts";
 import { resolveTargetDevice } from "../services/control-helpers.ts";
 import { dispatchPhoneDo } from "../services/control-service.ts";
 import { openingLabels } from "../services/opening-entry.ts";
-import { formatTaskOutcome, markOpeningResponsePrepared } from "./formatters.ts";
+import { formatTaskOutcome, markResponsePrepared } from "./formatters.ts";
 import { attachOpeningGuide, goalKeySchema } from "./playbook-tools.ts";
 
 export type ToolWrapper = (fn: () => Promise<CallToolResult>) => Promise<CallToolResult>;
@@ -58,8 +58,8 @@ export function registerConvenienceTools(
     opening_labels?: string[];
     include_screenshot: IncludeScreenshotMode;
     wait_timeout_ms?: number;
-  }) =>
-    formatTaskOutcome(
+  }, finalize = true) => {
+    const result = formatTaskOutcome(
       await dispatchPhoneDo(env, actor, {
         ...opts,
         full: false,
@@ -67,6 +67,8 @@ export function registerConvenienceTools(
         wait_timeout_ms: opts.wait_timeout_ms ?? TASK_LIMITS.DEFAULT_WAIT_TIMEOUT_MS,
       }),
     );
+    return finalize ? markResponsePrepared(result) : result;
+  };
 
   const commonOpts = {
     device_id: z.string().min(1).optional(),
@@ -208,8 +210,8 @@ export function registerConvenienceTools(
         ? { path: { goal: "Open destination", steps: [{ navigate: { app, destination, ...(fresh ? { fresh } : {}) } }] } }
         : { launch: fresh ? { bundle: app, fresh } : app };
       const labels = !destination && opts.include_screenshot === "auto" ? openingLabels(app, goal_key) : undefined;
-      const pending = runDo({ ...opts, require_fresh_observation: false, actions: [action], opening_labels: labels });
-      return markOpeningResponsePrepared(await attachOpeningGuide(pending, env.db, actor, app, goal_key));
+      const pending = runDo({ ...opts, require_fresh_observation: false, actions: [action], opening_labels: labels }, false);
+      return markResponsePrepared(await attachOpeningGuide(pending, env.db, actor, app, goal_key), true);
     }),
   );
 }

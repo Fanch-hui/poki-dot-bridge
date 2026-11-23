@@ -27,6 +27,7 @@ import {
   formatMcpError,
   formatStatusResult,
   formatTaskOutcome,
+  markResponsePrepared,
 } from "./formatters.ts";
 
 export const MCP_SERVER_INFO = { name: "poki-dot-bridge", version: "1.0.4" } as const;
@@ -81,7 +82,7 @@ export function createBridgeMcpServer(env: BridgeRuntimeEnv, actor: string): Mcp
     ({ goal_key, ...args }) => wrapTool(async () => {
       const outcome = await dispatchPhoneLook(env, actor, args);
       const app = outcome.observation?.app_name ?? outcome.observation?.app_bundle_id ?? undefined;
-      return attachOpeningGuide(formatTaskOutcome(outcome), env.db, actor, app, goal_key);
+      return markResponsePrepared(await attachOpeningGuide(formatTaskOutcome(outcome), env.db, actor, app, goal_key));
     }),
   );
 
@@ -96,12 +97,12 @@ export function createBridgeMcpServer(env: BridgeRuntimeEnv, actor: string): Mcp
     },
     async (args) =>
       wrapTool(async () =>
-        formatTaskOutcome(
+        markResponsePrepared(formatTaskOutcome(
           await dispatchPhoneDo(env, actor, {
             ...args,
             actions: args.actions as Array<Record<string, unknown>>,
           }),
-        ),
+        )),
       ),
   );
 

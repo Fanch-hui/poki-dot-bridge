@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { formatTaskOutcome } from "../src/server/mcp/formatters.ts";
+import { formatTaskOutcome, markResponsePrepared } from "../src/server/mcp/formatters.ts";
 import { shouldAttachScreenshot } from "../src/server/services/control-helpers.ts";
 import type { ObservationRecord, TaskRecord } from "../src/shared/types.ts";
 
@@ -52,6 +52,58 @@ test("A screen and its original annotations appear once while diagnostics stay a
   assert.match(body.text, /actions:[\s\S]*tap: sent/);
   assert.match(body.text, /phone_get_result\(task_id="tsk_1", include_screenshot="always"\)/);
   assert.equal((formatted.structuredContent?.observation as ObservationRecord).observation_id, "obs_1");
+});
+
+test("An approval screen records observed return phases without inferring a terminal receipt", () => {
+  const info = console.info;
+  let event: Record<string, unknown> | undefined;
+  console.info = (value: string) => { event = JSON.parse(value) as Record<string, unknown>; };
+  try {
+    const response = markResponsePrepared(formatTaskOutcome({
+      task: task("", "awaiting_approval"), observation,
+      screenshot: { base64: "AA==", mimeType: "image/jpeg" },
+      live_execution: true, settled_observed_at_ms: Date.now(), settle_poll_count: 2, screenshot_read_ms: 3,
+    }));
+    const timing = response.structuredContent?.timing_ms as Record<string, number>;
+    assert.equal(typeof timing.response_prepared_at_ms, "number");
+    assert.ok(timing.settled_observed_to_response_prepared_ms >= 0);
+    assert.equal(timing.device_result_to_response_prepared_ms, undefined);
+    assert.equal(event?.awaiting_approval, 1);
+    assert.equal(event?.device_result_received_at_ms, undefined);
+    assert.equal(event?.screenshot_read_ms, 3);
+  } finally {
+    console.info = info;
+  }
+});
+
+test("A delivery entry stands out on a mixed-service home screen without an explicit goal", () => {
+  const launch = { ...task(""), payload: { actions: [{ launch: "Shop" }] } };
+  const obs: ObservationRecord = {
+    ...observation, elements: [
+      { ref: 3, type: "StaticText", label: "外卖", frame: [52, 207, 27, 19] },
+      { ref: 20, type: "Button", label: "外卖", frame: [11, 143, 74, 77] },
+      { ref: 22, type: "Button", label: "团购", frame: [92, 143, 74, 77] },
+    ],
+  };
+  const screen = (withPicture: boolean) => formatTaskOutcome({ task: launch, observation: obs,
+    screenshot: withPicture ? { base64: "AA==", mimeType: "image/jpeg" } : null }).content[0];
+  assert.match(JSON.stringify(screen(true)), /“外卖” entry \(ref 20\)/);
+  assert.doesNotMatch(JSON.stringify(screen(false)), /For food delivery/);
+  obs.elements[1].flags = ["covered"];
+  assert.doesNotMatch(JSON.stringify(screen(true)), /For food delivery/);
+});
+
+test("A mixed results page identifies the delivery tab without guessing its selection", () => {
+  const obs: ObservationRecord = { ...observation, elements: [
+    { ref: 22, type: "StaticText", label: "全部", frame: [110, 118, 32, 22] },
+    { ref: 23, type: "StaticText", label: "外卖", frame: [168, 118, 32, 22] },
+    { ref: 24, type: "StaticText", label: "团购", frame: [225, 118, 32, 22] },
+  ] };
+  const screen = () => JSON.stringify(formatTaskOutcome({ task: task(""), observation: obs,
+    screenshot: { base64: "AA==", mimeType: "image/jpeg" } }).content[0]);
+  assert.match(screen(), /“外卖” tab is ref 23.*switch only if it is not already selected/);
+  obs.elements[2].frame[1] = 318;
+  assert.doesNotMatch(screen(), /For food delivery/);
 });
 
 test("Multiline controls appear once and the following diagnostic stays visible", () => {

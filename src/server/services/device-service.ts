@@ -201,9 +201,10 @@ export async function submitDeviceResult(
     ? "failed"
     : input.status;
   let observationId: string | null = null;
+  let observationTiming: Awaited<ReturnType<typeof saveObservation>> = null;
   if (input.observation) {
     observationId = input.observation.observation_id ?? newId("obs");
-    await saveObservation(env.db, env.bucket, {
+    observationTiming = await saveObservation(env.db, env.bucket, {
       observationId,
       deviceId: device.device_id,
       taskId: input.task_id,
@@ -227,6 +228,7 @@ export async function submitDeviceResult(
     });
   }
 
+  const taskWriteStartedAtMs = Date.now();
   const res = await completeOrUpdateTaskFromDevice(env.db, {
     taskId: input.task_id,
     deviceId: device.device_id,
@@ -253,9 +255,26 @@ export async function submitDeviceResult(
     nowMs,
   });
 
+  const taskWriteCompletedAtMs = Date.now();
   if (!res.ok) {
     const status = res.code === "STALE_GENERATION" ? 409 : 400;
     throw new AppError(status, res.code, res.message);
+  }
+
+  if (observationTiming && res.task.result_observation_id === observationId) {
+    console.info(JSON.stringify({
+      event: "poki_result_upload",
+      task_id: input.task_id,
+      screenshot_bytes: observationTiming.screenshotBytes,
+      received_at_ms: nowMs,
+      r2_write_started_at_ms: observationTiming.r2WriteStartedAtMs,
+      r2_write_completed_at_ms: observationTiming.r2WriteCompletedAtMs,
+      observation_write_started_at_ms: observationTiming.observationWriteStartedAtMs,
+      observation_write_completed_at_ms: observationTiming.observationWriteCompletedAtMs,
+      task_write_started_at_ms: taskWriteStartedAtMs,
+      task_write_completed_at_ms: taskWriteCompletedAtMs,
+      ready_at_ms: taskWriteCompletedAtMs,
+    }));
   }
 
   return {

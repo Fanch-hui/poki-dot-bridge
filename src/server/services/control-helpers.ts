@@ -144,7 +144,14 @@ export async function waitForTaskSettle(
   taskId: string,
   waitTimeoutMs: number,
   lastSeenAt: number | null,
-): Promise<{ task: TaskRecord; queue_wait: QueueWaitStatus | null; settledObservation?: ObservationWithMeta | null }> {
+  ordinaryLaunch = false,
+): Promise<{
+  task: TaskRecord;
+  queue_wait: QueueWaitStatus | null;
+  settledObservation?: ObservationWithMeta | null;
+  settled_observed_at_ms?: number;
+  settle_poll_count: number;
+}> {
   const clamped = Math.min(TASK_LIMITS.MAX_WAIT_TIMEOUT_MS, Math.max(0, waitTimeoutMs));
   const startedMs = Date.now();
   const deadline = startedMs + clamped;
@@ -153,8 +160,10 @@ export async function waitForTaskSettle(
     ? startedMs
     : startedMs + TASK_LIMITS.QUEUE_STATUS_CHECK_MS;
   let queueWait: QueueWaitStatus | null = null;
+  let settlePollCount = 0;
   while (true) {
     const nowMs = Date.now();
+    settlePollCount += 1;
     const found = await getTaskWithSettledObservation(env.db, taskId);
     if (!found) throw new AppError(404, "TASK_NOT_FOUND", "Task not found");
     let task = found.task;
@@ -163,7 +172,9 @@ export async function waitForTaskSettle(
       t.status === "awaiting_approval" ||
       ["succeeded", "failed", "cancelled", "timed_out"].includes(t.status);
 
-    if (isSettled(task)) return { ...found, queue_wait: null };
+    if (isSettled(task)) {
+      return { ...found, queue_wait: null, settled_observed_at_ms: Date.now(), settle_poll_count: settlePollCount };
+    }
 
     if (
       task.expires_at <= nowMs ||
@@ -171,30 +182,39 @@ export async function waitForTaskSettle(
     ) {
       await expireStaleTasksAndLeases(env.db, deviceId, nowMs);
       task = (await getTaskById(env.db, taskId)) ?? task;
-      if (isSettled(task)) return { task, queue_wait: null };
+      if (isSettled(task)) {
+        return { task, queue_wait: null, settled_observed_at_ms: Date.now(), settle_poll_count: settlePollCount };
+      }
     }
 
     if (task.status === "queued" && (nowMs >= nextQueueCheck || nowMs >= deadline)) {
       queueWait = await getQueueWaitStatus(env, task);
       task = (await getTaskById(env.db, taskId)) ?? task;
       if (task.status !== "queued") {
-        if (isSettled(task)) return { task, queue_wait: null };
+        if (isSettled(task)) {
+          return { task, queue_wait: null, settled_observed_at_ms: Date.now(), settle_poll_count: settlePollCount };
+        }
         queueWait = null;
       } else if (queueWait && queueWait.reason !== "waiting_for_phone") {
-        return { task, queue_wait: queueWait };
+        return { task, queue_wait: queueWait, settle_poll_count: settlePollCount };
       }
       nextQueueCheck = nowMs + TASK_LIMITS.QUEUE_STATUS_CHECK_MS;
     }
 
-    if (nowMs >= deadline) return { task, queue_wait: queueWait };
+    if (nowMs >= deadline) return { task, queue_wait: queueWait, settle_poll_count: settlePollCount };
 
     const elapsed = nowMs - startedMs;
-    const sliceMs =
-      elapsed < 2_000
-        ? TASK_LIMITS.MCP_POLL_SLICE_MS
-        : elapsed < 6_000
-          ? 300
-          : 600;
+    const active = task.status === "claimed" || task.status === "running";
+    const actions = task.payload.actions;
+    const shortScreenStep = task.tool_name === "look" || ordinaryLaunch ||
+      (Array.isArray(actions) && actions.length === 1 && actions[0] &&
+        typeof actions[0] === "object" && ("tap" in actions[0] || "swipe" in actions[0]));
+    let sliceMs = 600;
+    if (elapsed < 2_000 || (elapsed < 6_000 && active && shortScreenStep)) {
+      sliceMs = TASK_LIMITS.MCP_POLL_SLICE_MS;
+    } else if (elapsed < 6_000 || (ordinaryLaunch && elapsed < 10_000 && active)) {
+      sliceMs = 300;
+    }
     await sleep(Math.min(sliceMs, deadline - nowMs));
   }
 }
@@ -206,18 +226,20 @@ export async function hydrateObservationAndScreenshot(
   fullMode = false,
   failed = false,
   settledObservation?: ObservationWithMeta | null,
-): Promise<{ observation: ObservationRecord | null; screenshot: ScreenshotData | null }> {
+): Promise<{ observation: ObservationRecord | null; screenshot: ScreenshotData | null; screenshot_read_ms?: number }> {
   if (!observationId) return { observation: null, screenshot: null };
   const found = settledObservation === undefined ? await getObservationById(env.db, observationId) : settledObservation;
   if (!found) return { observation: null, screenshot: null };
   let screenshot: ScreenshotData | null = null;
   if (shouldAttachScreenshot(includeScreenshot, found.observation, fullMode, failed)) {
+    const screenshotReadStarted = Date.now();
     const img = await getScreenshotFromR2ByMeta(env.bucket, {
       r2Key: found.r2Key,
       mimeType: found.observation.screenshot_mime,
       expiresAt: found.observation.screenshot_expires_at,
     });
     if (img) screenshot = { base64: img.base64, mimeType: img.mimeType };
+    return { observation: found.observation, screenshot, screenshot_read_ms: Date.now() - screenshotReadStarted };
   }
   return { observation: found.observation, screenshot };
 }

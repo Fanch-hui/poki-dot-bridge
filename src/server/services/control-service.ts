@@ -76,6 +76,10 @@ export async function dispatchPhoneLook(
   observation: ObservationRecord | null;
   screenshot: ScreenshotData | null;
   queue_wait: QueueWaitStatus | null;
+  live_execution: boolean;
+  settled_observed_at_ms?: number;
+  settle_poll_count: number;
+  screenshot_read_ms?: number;
 }> {
   const nowMs = Date.now();
   const device = await resolveTargetDevice(env, input.device_id, true);
@@ -107,7 +111,7 @@ export async function dispatchPhoneLook(
     }),
     waitForTaskSettle(env, device.device_id, task.task_id, input.wait_timeout_ms, device.last_seen_at),
   ]);
-  const { observation, screenshot } = await hydrateObservationAndScreenshot(
+  const { observation, screenshot, screenshot_read_ms } = await hydrateObservationAndScreenshot(
     env,
     settled.task.result_observation_id,
     input.include_screenshot,
@@ -115,7 +119,7 @@ export async function dispatchPhoneLook(
     settled.task.status === "failed" || settled.task.status === "timed_out" || settled.task.uncertain_execution,
     settled.settledObservation,
   );
-  return { ...settled, observation, screenshot };
+  return { ...settled, observation, screenshot, screenshot_read_ms, live_execution: true };
 }
 
 function summarizeActions(actions: Array<Record<string, unknown>>): string {
@@ -145,6 +149,10 @@ export async function dispatchPhoneDo(
   observation: ObservationRecord | null;
   screenshot: ScreenshotData | null;
   queue_wait: QueueWaitStatus | null;
+  live_execution: boolean;
+  settled_observed_at_ms?: number;
+  settle_poll_count: number;
+  screenshot_read_ms?: number;
   since_open_device_result_received_ms?: number;
   interstep_timing_unavailable?: boolean;
 }> {
@@ -191,6 +199,10 @@ export async function dispatchPhoneDo(
     nowMs,
   });
 
+  const actions = task.payload.actions;
+  const ordinaryLaunch = Array.isArray(actions) && actions.length === 1 &&
+    actions[0] !== null && typeof actions[0] === "object" &&
+    Object.keys(actions[0]).length === 1 && Object.hasOwn(actions[0], "launch");
   const [, settled, openTiming] = await Promise.all([
     recordAuditEvent(env.db, {
       deviceId: device.device_id,
@@ -200,7 +212,7 @@ export async function dispatchPhoneDo(
       detail: { tool_name: "do", payload: redactActionPayload(payload) },
       nowMs,
     }),
-    waitForTaskSettle(env, device.device_id, task.task_id, input.wait_timeout_ms, device.last_seen_at),
+    waitForTaskSettle(env, device.device_id, task.task_id, input.wait_timeout_ms, device.last_seen_at, ordinaryLaunch),
     input.observation_id && task.task_id === taskId
       ? getOpenCompletedAt(env.db, input.observation_id, device.device_id, actor)
         .then((completedAt) => ({ completedAt, unavailable: false }))
@@ -209,7 +221,7 @@ export async function dispatchPhoneDo(
   ]);
   const entry = !input.full && input.include_screenshot === "auto"
     ? verifiedOpeningEntry(settled.task, settled.settledObservation?.observation) : undefined;
-  const { observation, screenshot } = await hydrateObservationAndScreenshot(
+  const { observation, screenshot, screenshot_read_ms } = await hydrateObservationAndScreenshot(
     env,
     settled.task.result_observation_id,
     entry ? "never" : input.include_screenshot,
@@ -220,7 +232,7 @@ export async function dispatchPhoneDo(
   const sinceOpenResultReceived = openTiming.completedAt !== null && openTiming.completedAt <= task.created_at
     ? task.created_at - openTiming.completedAt : undefined;
   return {
-    ...settled, observation, screenshot,
+    ...settled, observation, screenshot, screenshot_read_ms, live_execution: task.task_id === taskId,
     ...(sinceOpenResultReceived !== undefined
       ? { since_open_device_result_received_ms: sinceOpenResultReceived } : {}),
     ...(openTiming.unavailable ? { interstep_timing_unavailable: true } : {}),

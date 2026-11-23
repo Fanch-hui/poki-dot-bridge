@@ -90,12 +90,19 @@ export async function saveObservation(
     maxScreenshotBytes: number;
     nowMs: number;
   },
-): Promise<ObservationRecord> {
+): Promise<{
+  screenshotBytes: number;
+  r2WriteStartedAtMs: number;
+  r2WriteCompletedAtMs: number;
+  observationWriteStartedAtMs: number;
+  observationWriteCompletedAtMs: number;
+} | null> {
   let r2Key: string | null = null;
   let mime: string | null = null;
   let sizeBytes: number | null = null;
   let expiresAt: number | null = null;
-  let r2PutPromise: Promise<unknown> = Promise.resolve();
+  let r2WriteStartedAtMs: number | null = null;
+  let r2PutPromise: Promise<number | null> = Promise.resolve(null);
 
   if (params.screenshotBase64) {
     const bytes = base64ToBytes(params.screenshotBase64);
@@ -107,6 +114,7 @@ export async function saveObservation(
     r2Key = `screenshots/${params.deviceId}/${params.observationId}.${ext}`;
     sizeBytes = bytes.byteLength;
     expiresAt = params.nowMs + params.screenshotTtlSeconds * 1000;
+    r2WriteStartedAtMs = Date.now();
     r2PutPromise = bucket.put(r2Key, bytes, {
       httpMetadata: {
         contentType: mime,
@@ -117,9 +125,10 @@ export async function saveObservation(
         observation_id: params.observationId,
         expires_at: String(expiresAt),
       },
-    });
+    }).then(() => Date.now());
   }
 
+  const observationWriteStartedAtMs = Date.now();
   const saveObservationPromise = db
     .prepare(
       `INSERT INTO observations (
@@ -156,32 +165,14 @@ export async function saveObservation(
       expiresAt,
       params.nowMs,
     )
-    .run();
+    .run()
+    .then(() => Date.now());
 
-  await Promise.all([r2PutPromise, saveObservationPromise]);
-
-  return {
-    observation_id: params.observationId,
-    device_id: params.deviceId,
-    task_id: params.taskId ?? null,
-    app_bundle_id: params.appBundleId ?? null,
-    app_name: params.appName ?? null,
-    screen_width: params.screenWidth ?? null,
-    screen_height: params.screenHeight ?? null,
-    coordinate_unit: params.coordinateUnit,
-    screen_locked: params.screenLocked,
-    screen_changed: params.screenChanged ?? null,
-    screen_hash: params.screenHash ?? null,
-    elements: params.elements,
-    visible_text: params.visibleText,
-    raw_text: params.rawText,
-    notes: params.notes,
-    has_screenshot: Boolean(r2Key),
-    screenshot_mime: mime,
-    screenshot_bytes: sizeBytes,
-    screenshot_expires_at: expiresAt,
-    created_at: params.nowMs,
-  };
+  const [r2WriteCompletedAtMs, observationWriteCompletedAtMs] =
+    await Promise.all([r2PutPromise, saveObservationPromise]);
+  if (sizeBytes === null || r2WriteStartedAtMs === null || r2WriteCompletedAtMs === null) return null;
+  return { screenshotBytes: sizeBytes, r2WriteStartedAtMs, r2WriteCompletedAtMs,
+    observationWriteStartedAtMs, observationWriteCompletedAtMs };
 }
 
 export async function getObservationScreenSize(

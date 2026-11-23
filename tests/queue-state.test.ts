@@ -277,6 +277,49 @@ test("Device result requires the task's device, lease and session before updatin
   assert.equal((await submitDeviceResult(env, dev, result)).task_status, "awaiting_approval");
 });
 
+test("Screenshot upload reports stage timings without screen contents", async () => {
+  const { env, deviceId } = await setupPairedDevice();
+  const nowMs = Date.now();
+  await enqueueTask(env.db, {
+    taskId: "tsk_timed_upload", deviceId, toolName: "look", actionSummary: "look",
+    payload: {}, createdBy: "dot", expiresAt: nowMs + 60_000, nowMs,
+  });
+  const device = (await getDeviceById(env.db, deviceId))!.device;
+  const claimed = (await pollDevice(env, device, { wait_ms: 0 })).task!;
+  const entries: string[] = [];
+  const originalInfo = console.info;
+  console.info = (entry: unknown) => { entries.push(String(entry)); };
+  let uploaded: Awaited<ReturnType<typeof submitDeviceResult>>;
+  try {
+    uploaded = await submitDeviceResult(env, device, {
+      task_id: claimed.task_id, lease_token: claimed.lease_token, status: "succeeded",
+      summary: "Private screen contents", raw_text: "Private screen contents",
+      observation: {
+        coordinate_unit: "points", screen_locked: false, elements: [],
+        visible_text: "Private screen contents", raw_text: "Private screen contents", notes: [],
+        screenshot_base64: MOCK_JPEG_BASE64, screenshot_mime: "image/jpeg",
+      },
+    });
+  } finally {
+    console.info = originalInfo;
+  }
+  assert.equal(uploaded.task_status, "succeeded");
+  assert.equal(entries.length, 1);
+  const timing = JSON.parse(entries[0]) as Record<string, number | string>;
+  assert.equal(timing.event, "poki_result_upload");
+  assert.equal(timing.task_id, claimed.task_id);
+  assert.equal(timing.screenshot_bytes, Buffer.from(MOCK_JPEG_BASE64, "base64").byteLength);
+  assert.doesNotMatch(entries[0], /Private screen contents/);
+  assert.ok(Number(timing.received_at_ms) <= Number(timing.r2_write_started_at_ms));
+  assert.ok(Number(timing.r2_write_started_at_ms) <= Number(timing.r2_write_completed_at_ms));
+  assert.ok(Number(timing.observation_write_started_at_ms) <= Number(timing.observation_write_completed_at_ms));
+  assert.ok(Number(timing.task_write_started_at_ms) >= Math.max(
+    Number(timing.r2_write_completed_at_ms), Number(timing.observation_write_completed_at_ms),
+  ));
+  assert.ok(Number(timing.ready_at_ms) >= Number(timing.task_write_started_at_ms));
+  assert.equal((await getTaskResult(env, claimed.task_id, "always")).screenshot?.base64, MOCK_JPEG_BASE64);
+});
+
 test("Cancellation stays pending until the phone reports its outcome and preserves late touch receipts", async () => {
   const { env, deviceId } = await setupPairedDevice();
   const nowMs = Date.now();

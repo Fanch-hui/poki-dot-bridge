@@ -11,6 +11,7 @@ const appSchema = z.string().trim().min(1).max(100);
 export const goalKeySchema = z.string().trim().max(48).regex(/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/)
   .describe("Reusable task name. Use search-takeout for food delivery searches, including within a shopping app.");
 const evidenceTaskIdSchema = z.string().trim().min(1).max(80);
+const deliverySearchGuidance = "For delivery, stay in the delivery channel if already there; otherwise choose a clear 外卖 or delivery entry before general search. After general search, select the 外卖 or delivery results tab if present and not already selected.";
 
 const builtInGuides: Record<string, readonly string[]> = {
   search: [
@@ -18,12 +19,12 @@ const builtInGuides: Record<string, readonly string[]> = {
     "Choose a suggestion only if it matches the query; verify the result.",
   ],
   "search-takeout": [
-    "Open the takeout channel first; use its search or the requested store's search.",
-    "For a named item, open its product card under the matching store and branch in search results. If only the store matches, open its menu and locate the item there.",
+    deliverySearchGuidance,
+    "Search the current channel or store. For a named item, open its delivery product card under the matching store and branch in search results. If only the store matches, open its menu and locate the item there.",
   ],
   "jd-search-takeout": [
-    "In JD, open 秒送 then 外卖; if already on 外卖, use its search instead of retail search.",
-    "Open the requested product card under the matching store and branch in search results. If only the store matches, enter it and use 搜索店内商品.",
+    `${deliverySearchGuidance} In JD, 秒送 then 外卖 leads to delivery.`,
+    "Search the current channel or store. Open the requested delivery product card under the matching store and branch in search results. If only the store matches, enter it and use 搜索店内商品.",
   ],
   "dismiss-popup": [
     "Use Close, Skip or Cancel on the foreground overlay; claiming, sharing or granting access is a separate action.",
@@ -107,8 +108,12 @@ async function lookupGuide(
   const knownApp = app ? appKey(app) : null;
   const entry = knownApp ? await findPlaybookEntry(db, { actor, app: knownApp, goal }) : null;
   if (entry) {
-    const text = `Verified app experience:\n${entry.when}\n${entry.steps.join("\n")}\nVerify: ${entry.success_marker}`;
-    return { content: [{ type: "text", text }], structuredContent: { entry, source: "verified" } };
+    const guidance = goal === "search-takeout"
+      ? { source: "built_in", steps: [deliverySearchGuidance] }
+      : undefined;
+    const text = (guidance ? `Delivery search: ${deliverySearchGuidance}\n` : "") +
+      `Verified app experience:\n${entry.when}\n${entry.steps.join("\n")}\nVerify: ${entry.success_marker}`;
+    return { content: [{ type: "text", text }], structuredContent: { entry, source: "verified", ...(guidance ? { guidance } : {}) } };
   }
   const steps = builtInGuide(goal, knownApp);
   if (steps) {

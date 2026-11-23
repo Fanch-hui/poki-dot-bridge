@@ -227,7 +227,16 @@ test("The first action using an opened screen reports its server-side interstep 
     assert.ok(openingTiming.response_prepared_at_ms >= openingTiming.device_result_received_at_ms);
     assert.equal(openingTiming.device_result_to_response_prepared_ms,
       openingTiming.response_prepared_at_ms - openingTiming.device_result_received_at_ms);
+    assert.ok(openingTiming.settled_observed_at_ms >= openingTiming.device_result_received_at_ms);
+    assert.ok(openingTiming.response_prepared_at_ms >= openingTiming.settled_observed_at_ms);
+    assert.equal(openingTiming.device_result_to_settled_observed_ms,
+      openingTiming.settled_observed_at_ms - openingTiming.device_result_received_at_ms);
+    assert.equal(openingTiming.settled_observed_to_response_prepared_ms,
+      openingTiming.response_prepared_at_ms - openingTiming.settled_observed_at_ms);
+    assert.equal(openingTiming.device_result_to_settled_observed_ms +
+      openingTiming.settled_observed_to_response_prepared_ms, openingTiming.device_result_to_response_prepared_ms);
     assert.equal(nextTiming.request_received_at_ms, nextTask.created_at);
+    assert.ok(nextTiming.settled_observed_at_ms >= nextTiming.device_result_received_at_ms);
     assert.equal(nextTiming.since_open_device_result_received_ms, gap);
     assert.match(next.content[0].text ?? "", new RegExp(`since_open_device_result_received=${gap} \\(server receipt of phone result to next request\\)`));
 
@@ -248,6 +257,71 @@ test("The first action using an opened screen reports its server-side interstep 
     });
     assert.equal((later.structured.timing_ms as Record<string, number>).since_open_device_result_received_ms, undefined);
   } finally {
+    await mcp.close().catch(() => {});
+    await phone.stop();
+    await srv.close();
+  }
+});
+
+test("Live screen results report return stages once, and stored results are not measured again", async () => {
+  const { srv, phone, mcp } = await createConnectedMcpHarness();
+  const messages: Array<Record<string, unknown>> = [];
+  const info = console.info;
+  console.info = (...args: unknown[]) => {
+    if (typeof args[0] === "string" && args[0].includes('"event":"poki_result_return"')) {
+      messages.push(JSON.parse(args[0]) as Record<string, unknown>);
+    } else {
+      info(...args);
+    }
+  };
+  try {
+    const open = await invokeTool(mcp, "phone_open_app", {
+      app: "Settings", goal_key: "search", include_screenshot: "always",
+    });
+    const initial = open.structured.observation as ObservationRecord;
+    const tap = await invokeTool(mcp, "phone_tap", {
+      ref: 2, observation_id: initial.observation_id, include_screenshot: "always",
+    });
+    const look = await invokeTool(mcp, "phone_look", { goal_key: "search", include_screenshot: "always" });
+    const doArgs = {
+      actions: [{ tap: 1 }], require_fresh_observation: false,
+      idempotency_key: "timing-once", include_screenshot: "always",
+    };
+    const action = await invokeTool(mcp, "phone_do", doArgs);
+    for (const result of [open, tap, look, action]) {
+      assert.equal(result.structured.status, "succeeded");
+      const timing = result.structured.timing_ms as Record<string, number>;
+      assert.ok(timing.settle_poll_count >= 1);
+      assert.ok(timing.settled_observed_at_ms >= timing.device_result_received_at_ms);
+      assert.ok(timing.response_prepared_at_ms >= timing.formatted_at_ms);
+      assert.ok(timing.screenshot_read_ms >= 0);
+      assert.ok(timing.formatting_ms >= 0);
+      assert.equal(timing.post_format_to_response_prepared_ms,
+        timing.response_prepared_at_ms - timing.formatted_at_ms);
+      assert.equal(timing.device_result_to_response_prepared_ms,
+        timing.response_prepared_at_ms - timing.device_result_received_at_ms);
+    }
+    assert.equal(messages.length, 4);
+    for (const message of messages) {
+      assert.deepEqual(Object.keys(message).sort(), [
+        "device_result_received_at_ms", "device_result_to_response_prepared_ms",
+        "device_result_to_settled_observed_ms", "event", "formatting_ms",
+        "awaiting_approval", "success",
+        "post_format_to_response_prepared_ms", "response_prepared_at_ms",
+        "screenshot_bytes", "screenshot_read_ms", "settle_poll_count",
+        "settled_observed_at_ms", "settled_observed_to_response_prepared_ms", "task_id",
+      ].sort());
+    }
+    const retried = await invokeTool(mcp, "phone_do", doArgs);
+    const archived = await invokeTool(mcp, "phone_get_result", {
+      task_id: action.structured.task_id, include_screenshot: "always",
+    });
+    assert.equal(retried.structured.task_id, action.structured.task_id);
+    assert.equal((retried.structured.timing_ms as Record<string, number>).settle_poll_count, undefined);
+    assert.equal((archived.structured.timing_ms as Record<string, number>).settle_poll_count, undefined);
+    assert.equal(messages.length, 4);
+  } finally {
+    console.info = info;
     await mcp.close().catch(() => {});
     await phone.stop();
     await srv.close();
@@ -295,9 +369,12 @@ test("Phone handbook returns one concise built-in guide for a common goal", asyn
     const jd = await invokeTool(mcp, "phone_playbook_lookup", { app: "JD", goal_key: "search-takeout" });
     assert.match(jd.content[0].text ?? "", /秒送 then 外卖/);
     const otherApp = await invokeTool(mcp, "phone_playbook_lookup", { app: "Other App", goal_key: "search-takeout" });
-    assert.match(otherApp.content[0].text ?? "", /Open the takeout channel first/);
+    assert.match(otherApp.content[0].text ?? "", /choose a clear 外卖 or delivery entry before general search/);
     for (const guide of [jd, otherApp]) {
-      assert.match(guide.content[0].text ?? "", /product card under the matching store and branch in search results/);
+      assert.match(guide.content[0].text ?? "", /delivery product card under the matching store and branch in search results/);
+      assert.match(guide.content[0].text ?? "", /stay in the delivery channel if already there/);
+      assert.match(guide.content[0].text ?? "", /choose a clear 外卖 or delivery entry before general search/);
+      assert.match(guide.content[0].text ?? "", /After general search[^.]*delivery results tab[^.]*not already selected/);
     }
     const unknown = await invokeTool(mcp, "phone_playbook_lookup", { goal_key: "open-wifi" });
     assert.equal(unknown.structured.entry, null);
@@ -369,6 +446,18 @@ test("Phone handbook returns and replaces only the matching verified experience"
     });
     const looked = await invokeTool(mcp, "phone_look", { goal_key: commonGoal.goal_key, include_screenshot: "never" });
     assert.deepEqual(looked.structured.playbook, preferred.structured);
+    const takeoutLesson = { ...lesson, goal_key: "search-takeout" };
+    assert.equal((await invokeTool(mcp, "phone_playbook_learn", takeoutLesson)).structured.saved, true);
+    const takeout = await invokeTool(mcp, "phone_playbook_lookup", { app: lesson.app, goal_key: takeoutLesson.goal_key });
+    assert.equal(takeout.structured.source, "verified");
+    assert.match(takeout.content[0].text ?? "", /stay in the delivery channel if already there/);
+    assert.match(takeout.content[0].text ?? "", /choose a clear 外卖 or delivery entry before general search/);
+    assert.match(takeout.content[0].text ?? "", /After general search[^.]*delivery results tab[^.]*not already selected/);
+    assert.deepEqual(takeout.structured.entry, {
+      when: lesson.when, steps: lesson.steps, success_marker: lesson.success_marker,
+    });
+    const takeoutLook = await invokeTool(mcp, "phone_look", { goal_key: takeoutLesson.goal_key, include_screenshot: "never" });
+    assert.deepEqual(takeoutLook.structured.playbook, takeout.structured);
     const found = await invokeTool(mcp, "phone_playbook_lookup", { app: "  ＳＥＴＴＩＮＧＳ  ", goal_key: target.goal_key });
     assert.deepEqual(found.structured.entry, {
       when: lesson.when, steps: lesson.steps, success_marker: lesson.success_marker,

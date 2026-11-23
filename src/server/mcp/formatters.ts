@@ -6,7 +6,7 @@ import type {
   TaskRecord,
 } from "../../shared/types.ts";
 import { AppError } from "../http.ts";
-import { verifiedOpeningEntry } from "../services/opening-entry.ts";
+import { deliveryChannelHint, verifiedOpeningEntry } from "../services/opening-entry.ts";
 import { CANCEL_ACK_PENDING_RESULT } from "../db/tasks-repo.ts";
 import type { ScreenshotData } from "../services/control-service.ts";
 import type { QueueWaitStatus } from "../services/control-helpers.ts";
@@ -207,9 +207,14 @@ export function formatTaskOutcome(data: {
   observation: ObservationRecord | null;
   screenshot: ScreenshotData | null;
   queue_wait?: QueueWaitStatus | null;
+  live_execution?: boolean;
+  settled_observed_at_ms?: number;
+  settle_poll_count?: number;
+  screenshot_read_ms?: number;
   since_open_device_result_received_ms?: number;
   interstep_timing_unavailable?: boolean;
 }): CallToolResult {
+  const formatStarted = Date.now();
   const { task, observation, screenshot } = data;
   const queueWaitMs =
     task.claimed_at !== null ? Math.max(0, task.claimed_at - task.created_at) : null;
@@ -225,6 +230,12 @@ export function formatTaskOutcome(data: {
     total_ms: totalMs,
     ...(task.status === "succeeded" && task.claimed_at !== null && task.completed_at !== null
       ? { device_result_received_at_ms: task.completed_at } : {}),
+    ...(data.live_execution && data.settled_observed_at_ms !== undefined
+      ? { settled_observed_at_ms: data.settled_observed_at_ms } : {}),
+    ...(data.live_execution && data.settle_poll_count !== undefined
+      ? { settle_poll_count: data.settle_poll_count } : {}),
+    ...(data.live_execution && data.screenshot_read_ms !== undefined
+      ? { screenshot_read_ms: data.screenshot_read_ms } : {}),
     ...(data.since_open_device_result_received_ms !== undefined
       ? { since_open_device_result_received_ms: data.since_open_device_result_received_ms } : {}),
   };
@@ -246,6 +257,8 @@ export function formatTaskOutcome(data: {
     if (entry) lines.push(`Visible entry: ref ${entry.ref} "${entry.label}" (confirmed in this screenshot).`);
     if (screenshot) {
       lines.push("screenshot: attached for this observation");
+      const hint = !entry && deliveryChannelHint(task, observation);
+      if (hint) lines.push(hint);
     } else if (observation.has_screenshot &&
                (observation.screenshot_expires_at === null || observation.screenshot_expires_at > Date.now())) {
       lines.push(`screenshot: available for this observation via phone_get_result(task_id="${task.task_id}", include_screenshot="always")`);
@@ -350,6 +363,7 @@ export function formatTaskOutcome(data: {
   const isError =
     (task.status === "failed" || task.status === "timed_out") && !observation;
 
+  const formatted = Date.now();
   return {
     content,
     structuredContent: {
@@ -370,28 +384,73 @@ export function formatTaskOutcome(data: {
       handoff_required: task.result?.handoff_required ?? null,
       observation: observation ?? null,
       screenshot_attached: Boolean(screenshot),
-      timing_ms: timingMs,
+      timing_ms: {
+        ...timingMs,
+        ...(data.live_execution ? {
+          formatted_at_ms: formatted,
+          formatting_ms: formatted - formatStarted,
+        } : {}),
+      },
     },
     isError,
   };
 }
 
-export function markOpeningResponsePrepared(result: CallToolResult): CallToolResult {
+export function markResponsePrepared(result: CallToolResult, opening = false): CallToolResult {
   const structured = result.structuredContent;
   const timing = structured?.timing_ms as Record<string, unknown> | undefined;
   const received = timing?.device_result_received_at_ms;
-  if (result.isError || structured?.status !== "succeeded" || !structured.observation || typeof received !== "number") {
+  if (!structured?.observation || typeof timing?.settle_poll_count !== "number" ||
+      typeof timing.settled_observed_at_ms !== "number") {
     return result;
   }
   const prepared = Date.now();
-  const elapsed = Math.max(0, prepared - received);
+  const elapsed = typeof received === "number" ? Math.max(0, prepared - received) : undefined;
+  const settled = timing?.settled_observed_at_ms;
+  // The first segment includes saving and waiting for a completed task; the second includes
+  // screenshot retrieval, result formatting and any remaining guide lookup.
+  const phases = typeof settled === "number" && typeof received === "number" &&
+      settled >= received && settled <= prepared
+    ? {
+        device_result_to_settled_observed_ms: settled - received,
+        settled_observed_to_response_prepared_ms: prepared - settled,
+      }
+    : undefined;
+  const phaseText = phases
+    ? ` settled_observed_at=${settled} device_result_to_settled_observed=${phases.device_result_to_settled_observed_ms} settled_observed_to_response_prepared=${phases.settled_observed_to_response_prepared_ms} (result storage and polling; screenshot and response preparation)`
+    : "";
   const content = [...result.content];
   const first = content[0];
-  if (first?.type === "text") {
+  if (opening && elapsed !== undefined && first?.type === "text") {
     content[0] = {
       ...first,
-      text: `${first.text}\ntiming_ms: response_prepared_at=${prepared} device_result_to_response_prepared=${elapsed}`,
+      text: `${first.text}\ntiming_ms: response_prepared_at=${prepared} device_result_to_response_prepared=${elapsed}${phaseText}`,
     };
+  }
+  const formatted = timing.formatted_at_ms;
+  const afterFormatting = typeof formatted === "number" && formatted <= prepared
+    ? { post_format_to_response_prepared_ms: prepared - formatted } : {};
+  const afterSettled = typeof settled === "number" && settled <= prepared
+    ? { settled_observed_to_response_prepared_ms: prepared - settled } : {};
+  const observation = structured.observation as ObservationRecord;
+  if (structured.screenshot_attached) {
+    console.info(JSON.stringify({
+      event: "poki_result_return",
+      task_id: structured.task_id,
+      success: structured.status === "succeeded" ? 1 : 0,
+      awaiting_approval: structured.status === "awaiting_approval" ? 1 : 0,
+      screenshot_bytes: observation.screenshot_bytes,
+      device_result_received_at_ms: received,
+      settled_observed_at_ms: settled,
+      settle_poll_count: timing.settle_poll_count,
+      screenshot_read_ms: timing.screenshot_read_ms,
+      formatting_ms: timing.formatting_ms,
+      response_prepared_at_ms: prepared,
+      device_result_to_response_prepared_ms: elapsed,
+      ...phases,
+      ...afterSettled,
+      ...afterFormatting,
+    }));
   }
   return {
     ...result,
@@ -402,6 +461,9 @@ export function markOpeningResponsePrepared(result: CallToolResult): CallToolRes
         ...timing,
         response_prepared_at_ms: prepared,
         device_result_to_response_prepared_ms: elapsed,
+        ...phases,
+        ...afterSettled,
+        ...afterFormatting,
       },
     },
   };

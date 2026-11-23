@@ -225,7 +225,7 @@ export async function completeOrUpdateTaskFromDevice(
     approvalTtlSeconds: number;
     nowMs: number;
   },
-): Promise<{ ok: true; task: TaskRecord } | { ok: false; code: string; message: string }> {
+): Promise<{ ok: true; task: Pick<TaskRecord, "status" | "result_observation_id"> } | { ok: false; code: string; message: string }> {
   const isTerminal = ["succeeded", "failed", "cancelled"].includes(params.status);
   const serializedResult = params.result ? JSON.stringify(params.result) : null;
   const nextLeaseExp = isTerminal
@@ -239,7 +239,7 @@ export async function completeOrUpdateTaskFromDevice(
   const hasHandoff = params.pendingHandoff !== undefined;
   const terminalFlag = isTerminal ? 1 : 0;
 
-  const [, updatedTask] = await db.batch<TaskRow>([
+  const [, updatedTask] = await db.batch<Pick<TaskRow, "status" | "result_observation_id">>([
     // Update the current screen only for the result this transaction accepts.
     // A late action result may describe an older screen, so it invalidates it.
     db
@@ -297,7 +297,7 @@ export async function completeOrUpdateTaskFromDevice(
                status = 'timed_out' OR (status = 'cancelled' AND error_code = ?)
              ))
            )
-         RETURNING *`,
+         RETURNING status, result_observation_id`,
       )
       .bind(
         params.status,
@@ -378,7 +378,7 @@ export async function completeOrUpdateTaskFromDevice(
   ]);
 
   const row = updatedTask.results[0];
-  if (row) return { ok: true, task: mapTaskRow(row) };
+  if (row) return { ok: true, task: row };
   const current = await getTaskById(db, params.taskId);
   if (!current || current.device_id !== params.deviceId) {
     return { ok: false, code: "TASK_NOT_FOUND", message: "Task does not exist for device" };
