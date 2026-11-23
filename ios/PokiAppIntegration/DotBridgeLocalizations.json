@@ -1,0 +1,221 @@
+{
+  "localizable": {
+    "Dot Bridge": {
+      "en": "Dot Bridge",
+      "zh-Hans": "Dot 桥接",
+      "zh-Hant": "Dot 橋接"
+    },
+    "Ready for Dot": {
+      "en": "Ready for Dot",
+      "zh-Hans": "Dot 已就绪",
+      "zh-Hant": "Dot 已就緒"
+    },
+    "Dot Is Working": {
+      "en": "Dot Is Working",
+      "zh-Hans": "Dot 正在执行",
+      "zh-Hant": "Dot 正在執行"
+    },
+    "Paired · Control Off": {
+      "en": "Paired · Control Off",
+      "zh-Hans": "已配对 · 未开启控制",
+      "zh-Hant": "已配對 · 未開啟控制"
+    },
+    "Connecting": {
+      "en": "Connecting",
+      "zh-Hans": "连接中",
+      "zh-Hant": "連線中"
+    },
+    "Offline": {
+      "en": "Offline",
+      "zh-Hans": "已离线",
+      "zh-Hant": "已離線"
+    },
+    "Emergency Stop Is On": {
+      "en": "Emergency Stop Is On",
+      "zh-Hans": "已启用紧急停止",
+      "zh-Hant": "已啟用緊急停止"
+    },
+    "Pairing Revoked": {
+      "en": "Pairing Revoked",
+      "zh-Hans": "配对已撤销",
+      "zh-Hant": "配對已撤銷"
+    },
+    "Unpaired": {
+      "en": "Unpaired",
+      "zh-Hans": "未配对",
+      "zh-Hant": "未配對"
+    },
+    "Send commands to your dot in ChatGPT.": {
+      "en": "Send commands to your dot in ChatGPT.",
+      "zh-Hans": "在 ChatGPT 中向你的 Dot 发送指令。",
+      "zh-Hant": "在 ChatGPT 中向你的 Dot 發送指令。"
+    },
+    "Turn on iPhone control and ask Dot to resume before sending more commands.": {
+      "en": "Turn on iPhone control and ask Dot to resume before sending more commands.",
+      "zh-Hans": "发送新指令前，请先开启 iPhone 控制并让 Dot 恢复运行。",
+      "zh-Hant": "發送新指令前，請先開啟 iPhone 控制並讓 Dot 恢復執行。"
+    },
+    "iPhone Control": {
+      "en": "iPhone Control",
+      "zh-Hans": "iPhone 控制",
+      "zh-Hant": "iPhone 控制"
+    },
+    "Allow Dot to Control This iPhone": {
+      "en": "Allow Dot to Control This iPhone",
+      "zh-Hans": "允许 Dot 控制这台 iPhone",
+      "zh-Hant": "允許 Dot 控制這台 iPhone"
+    },
+    "iPhone Setup": {
+      "en": "iPhone Setup",
+      "zh-Hans": "iPhone 配置",
+      "zh-Hant": "iPhone 設定"
+    },
+    "Emergency Stop": {
+      "en": "Emergency Stop",
+      "zh-Hans": "紧急停止",
+      "zh-Hant": "緊急停止"
+    },
+    "Connection Details": {
+      "en": "Connection Details",
+      "zh-Hans": "连接详情",
+      "zh-Hant": "連線詳情"
+    },
+    "Site": {
+      "en": "Site",
+      "zh-Hans": "站点",
+      "zh-Hant": "站點"
+    },
+    "Device": {
+      "en": "Device",
+      "zh-Hans": "设备",
+      "zh-Hant": "裝置"
+    },
+    "Site Access Token": {
+      "en": "Site Access Token",
+      "zh-Hans": "站点访问令牌",
+      "zh-Hant": "站點存取權杖"
+    },
+    "New Site Access Token": {
+      "en": "New Site Access Token",
+      "zh-Hans": "新的站点访问令牌",
+      "zh-Hant": "新的站點存取權杖"
+    },
+    "Save Token": {
+      "en": "Save Token",
+      "zh-Hans": "保存令牌",
+      "zh-Hant": "儲存權杖"
+    },
+    "Unpair": {
+      "en": "Unpair",
+      "zh-Hans": "取消配对",
+      "zh-Hant": "取消配對"
+    },
+    "Unpair from Dot?": {
+      "en": "Unpair from Dot?",
+      "zh-Hans": "要与 Dot 取消配对吗？",
+      "zh-Hant": "要與 Dot 取消配對嗎？"
+    },
+    "You’ll need a new pairing code to connect again.": {
+      "en": "You’ll need a new pairing code to connect again.",
+      "zh-Hans": "重新连接时需要输入新的配对码。",
+      "zh-Hant": "重新連線時需要輸入新的配對碼。"
+    },
+    "Pair with Dot": {
+      "en": "Pair with Dot",
+      "zh-Hans": "与 Dot 配对",
+      "zh-Hant": "與 Dot 配對"
+    },
+    "Pairing Code": {
+      "en": "Pairing Code",
+      "zh-Hans": "配对码",
+      "zh-Hant": "配對碼"
+    },
+    "Site URL": {
+      "en": "Site URL",
+      "zh-Hans": "站点地址",
+      "zh-Hant": "站點網址"
+    },
+    "Pair": {
+      "en": "Pair",
+      "zh-Hans": "配对",
+      "zh-Hant": "配對"
+    },
+    "Your Turn": {
+      "en": "Your Turn",
+      "zh-Hans": "需要你操作",
+      "zh-Hant": "需要你操作"
+    },
+    "Ask before sensitive actions": {
+      "en": "Ask before sensitive actions",
+      "zh-Hans": "敏感操作前询问我",
+      "zh-Hant": "敏感操作前詢問我"
+    },
+    "Respond in Poki, a notification, or the Live Activity. Payments, deletions and actions in Wallet always need your confirmation.": {
+      "en": "Respond in Poki, a notification, or the Live Activity. Payments, deletions and actions in Wallet always need your confirmation.",
+      "zh-Hans": "可在 Poki、通知或实时活动中确认。付款、删除及“钱包”中的操作始终需要你的确认。",
+      "zh-Hant": "可在 Poki、通知或即時動態中確認。付款、刪除及「錢包」中的操作始終需要你的確認。"
+    },
+    "Open Poki again afterwards, from the notification or the Home Screen.": {
+      "en": "Open Poki again afterwards, from the notification or the Home Screen.",
+      "zh-Hans": "随后请从通知或主屏幕重新打开 Poki。",
+      "zh-Hant": "隨後請從通知或主畫面重新開啟 Poki。"
+    },
+    "Open Poki again afterwards.": {
+      "en": "Open Poki again afterwards.",
+      "zh-Hans": "随后请重新打开 Poki。",
+      "zh-Hant": "隨後請重新開啟 Poki。"
+    },
+    "Pair with Dot first.": {
+      "en": "Pair with Dot first.",
+      "zh-Hans": "请先与 Dot 完成配对。",
+      "zh-Hant": "請先與 Dot 完成配對。"
+    }
+  },
+  "liveActivity": {
+    "Allow?": {
+      "en": "Review",
+      "zh-Hans": "待确认",
+      "zh-Hant": "待確認"
+    },
+    "Needs your confirmation": {
+      "en": "Needs your confirmation",
+      "zh-Hans": "需要你确认",
+      "zh-Hant": "需要你確認"
+    },
+    "Dot needs your confirmation": {
+      "en": "Dot needs your confirmation",
+      "zh-Hans": "Dot 需要你确认",
+      "zh-Hant": "Dot 需要你確認"
+    },
+    "Dot could not verify this approval. No approval was applied.": {
+      "en": "Dot could not verify this approval. No approval was applied.",
+      "zh-Hans": "未能确认任务仍有效，本次批准未生效。",
+      "zh-Hant": "未能確認任務仍有效，本次批准未生效。"
+    },
+    "Sending decision": {
+      "en": "Sending",
+      "zh-Hans": "正在提交",
+      "zh-Hant": "正在提交"
+    },
+    "Carrying on": {
+      "en": "Dot is continuing",
+      "zh-Hans": "Dot 继续执行",
+      "zh-Hant": "Dot 繼續執行"
+    },
+    "Continuing": {
+      "en": "Dot is continuing",
+      "zh-Hans": "Dot 继续执行",
+      "zh-Hant": "Dot 繼續執行"
+    },
+    "Step skipped": {
+      "en": "Dot skipped this step",
+      "zh-Hans": "Dot 已跳过这一步",
+      "zh-Hant": "Dot 已跳過這一步"
+    },
+    "Stopped": {
+      "en": "Dot stopped",
+      "zh-Hans": "Dot 已停止",
+      "zh-Hant": "Dot 已停止"
+    }
+  }
+}

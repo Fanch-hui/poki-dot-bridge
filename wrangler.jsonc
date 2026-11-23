@@ -1,0 +1,31 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "poki-dot-bridge",
+  "compatibility_date": "2026-02-12",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "main": "vinext/server/app-router-entry",
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "poki-dot-bridge-db",
+      "database_id": "local-dev-db",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "BUCKET",
+      "bucket_name": "poki-dot-bridge-screenshots"
+    }
+  ],
+  "vars": {
+    "TRUST_SITES_IDENTITY": "1",
+    "OAUTH_AUTHORIZATION_SERVER": "https://auth.openai.com",
+    "SCREENSHOT_TTL_SECONDS": "900",
+    "TASK_LEASE_SECONDS": "25",
+    "TASK_DEFAULT_TTL_SECONDS": "120",
+    "RETENTION_SECONDS": "604800"
+  }
+}
