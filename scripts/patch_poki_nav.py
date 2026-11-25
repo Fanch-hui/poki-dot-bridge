@@ -12,6 +12,8 @@ def patch_navigation(bridge_root: Path, core: Path) -> None:
     routines = source / "Routines.swift"
     actions = source / "Actions.swift"
     copy2(bridge_root / "ios/PokiAppIntegration/PokiFastActions.swift", source)
+    copy2(bridge_root / "ios/PokiAppIntegration/PokiNavigationEntry.swift", source)
+    copy2(bridge_root / "ios/PokiAppIntegration/PokiIconCaption.swift", source)
     tests = core / "Tests/PokiCoreTests"
     if tests.is_dir():
         copy2(bridge_root / "ios/PokiAppIntegration/PokiFastActionsTests.swift", tests)
@@ -69,8 +71,17 @@ def patch_navigation(bridge_root: Path, core: Path) -> None:
     replace_once(
         routines,
         """    func replay(_ skill: Skill, params: [String: String], store: SkillStore?, until: Double) async throws -> String {""",
-        """    func replay(_ skill: Skill, params: [String: String], store: SkillStore?, until: Double, expectedBundle: String? = nil) async throws -> String {""",
+        """    func replay(_ skill: Skill, params: [String: String], store: SkillStore?, until: Double,
+                expectedBundle: String? = nil, initialTarget: String? = nil) async throws -> String {""",
         "PokiCore bind automatic navigation to its app",
+    )
+    replace_once(
+        routines,
+        "                    var candidate: String?\n                    let attemptStart = now()",
+        """                    // The guarded opening read is the first candidate. A fresh tree must still confirm it.
+                    var candidate = index == 0 && closedHere == 0 ? initialTarget : nil
+                    let attemptStart = now()""",
+        "PokiCore reuse the opening read for navigation stability",
     )
     replace_once(
         routines,
@@ -87,9 +98,19 @@ def patch_navigation(bridge_root: Path, core: Path) -> None:
                         if expectedBundle != nil, tree.elements.contains(where: { ["Alert", "Sheet"].contains($0.type) && !$0.frame.isEmpty }) {
                             throw stop(index, "a dialog is in front")
                         }
-                        if expectedBundle != nil {
-                            do { tree.elements = try await navigationVisibleElements(tree.elements, screen: screen, until: stepEnds) }
-                            catch { throw stop(index, "overlapping pages could not be confirmed") }
+                        if let expectedBundle {
+                            let entry = skill.steps.count == 1 && ActionKind(action) == .tap &&
+                                step.optional != true && (step.expect?.isEmpty ?? true) && allowed.isEmpty ? target : nil
+                            do {
+                                let page = try await navigationPage(tree.elements, screen: screen, until: stepEnds,
+                                                                    entry: entry, expectedBundle: expectedBundle)
+                                if let evidence = page.evidence {
+                                    return try await tapVisibleEntry(evidence, app: expectedBundle, screen: screen, until: stepEnds)
+                                }
+                                tree.elements = page.elements
+                            }
+                            catch let failure as ActionFailure { throw stop(index, failure.message, failure.delivery) }
+                            catch { throw stop(index, "overlapping pages could not be confirmed: \(error)") }
                         }
                         if why == "the screen could not be read" { why = "\(target.describe) is not on screen" }""",
         "PokiCore stop automatic navigation on app or dialog changes",

@@ -22,6 +22,7 @@ struct PokiPageVisibility {
     }
 
     private let screen: ScreenSize
+    private let allCompetitions: [Competition]
     private let competitions: [Competition]
     private let anchors: [Int: [Anchor]]
     private let pages: [Element]
@@ -56,12 +57,14 @@ struct PokiPageVisibility {
                 Self.textAnchors($0, viewport: viewport)
             }
         }
+        let allCompetitions = competitions
         competitions = competitions.filter {
             Set((anchors[$0.front] ?? []).map(\.text)).count >= 2 &&
                 Set((anchors[$0.covered] ?? []).map(\.text)).count >= 2
         }
         guard !competitions.isEmpty else { return nil }
         self.screen = screen
+        self.allCompetitions = allCompetitions
         self.competitions = competitions
         self.anchors = anchors
         self.pages = pages
@@ -84,6 +87,11 @@ struct PokiPageVisibility {
     }
 
     func filter(_ elements: [Element], using texts: [RecognizedText]) -> [Element]? {
+        filter(elements, using: texts, target: nil)?.elements
+    }
+
+    func filter(_ elements: [Element], using texts: [RecognizedText], target: Element?)
+        -> (elements: [Element], targetConfirmed: Bool)? {
         var picturePoints: [String: [(x: Double, y: Double)]] = [:]
         for item in texts {
             guard let text = Self.normalized(item.text) else { continue }
@@ -94,23 +102,38 @@ struct PokiPageVisibility {
                 (picturePoints[anchor.text] ?? []).filter(anchor.frame.contains).map { (anchor.text, $0) }
             }
         }
-        let covered = Set(competitions.compactMap { pair -> Int? in
+        let resolved = competitions.filter { pair in
             guard let foreground = matches[pair.front], let background = matches[pair.covered],
-                  background.isEmpty, let coveredAnchors = anchors[pair.covered] else { return nil }
+                  background.isEmpty, let coveredAnchors = anchors[pair.covered] else { return false }
             // Require distinct text in the shared area, including a position the
             // accessibility tree attributes to different text on the other page.
             let witnessed = foreground.filter { pair.overlap.contains($0.1) }
             guard Set(witnessed.map { $0.0 }).count >= 2, witnessed.contains(where: { match in
                 coveredAnchors.contains { $0.text != match.0 && $0.frame.contains(match.1) }
-            }) else { return nil }
-            return pair.covered
-        })
+            }) else { return false }
+            return true
+        }
+        let covered = Set(resolved.map(\.covered))
         guard !covered.isEmpty else { return nil }
         let supported = matches.keys.filter { matches[$0]?.isEmpty == false }.map { pages[$0] }
-        let hidden = covered.map { pages[$0] }.filter { page in !supported.contains(where: page.contains) }
+        let hiddenIndices = covered.filter { index in !supported.contains(where: pages[index].contains) }
+        let hidden = hiddenIndices.map { pages[$0] }
         guard !hidden.isEmpty else { return nil }
-        return elements.filter { element in
+        let filtered = elements.filter { element in
             !hidden.contains { $0.node == element.node || $0.contains(element) }
         }
+        guard let target else { return (filtered, false) }
+        let containingPages = Set(pages.indices.filter { pages[$0].contains(target) })
+        let confirmed = resolved.contains {
+            containingPages.contains($0.front) && hiddenIndices.contains($0.covered)
+        }
+        let competitors = allCompetitions.compactMap { pair -> Int? in
+            let firstContainsTarget = containingPages.contains(pair.front)
+            let secondContainsTarget = containingPages.contains(pair.covered)
+            guard firstContainsTarget != secondContainsTarget,
+                  !pair.overlap.intersection(target.frame).isEmpty else { return nil }
+            return firstContainsTarget ? pair.covered : pair.front
+        }
+        return (filtered, confirmed && competitors.allSatisfy { hiddenIndices.contains($0) })
     }
 }

@@ -5,12 +5,13 @@ import { TASK_LIMITS } from "../../shared/constants.ts";
 import { IncludeScreenshotSchema } from "../../shared/schemas.ts";
 import type { IncludeScreenshotMode } from "../../shared/types.ts";
 import type { BridgeRuntimeEnv } from "../db/d1-types.ts";
-import { getObservationScreenSize } from "../db/observations-repo.ts";
+import { getObservationById, getObservationScreenSize } from "../db/observations-repo.ts";
 import { resolveTargetDevice } from "../services/control-helpers.ts";
 import { dispatchPhoneDo } from "../services/control-service.ts";
 import { openingLabels } from "../services/opening-entry.ts";
 import { formatTaskOutcome, markResponsePrepared } from "./formatters.ts";
 import { attachOpeningGuide, goalKeySchema } from "./playbook-tools.ts";
+import { searchMarkersPresentBefore, supportsLiveSearch, supportsResultWait } from "./contextual-search.ts";
 
 export type ToolWrapper = (fn: () => Promise<CallToolResult>) => Promise<CallToolResult>;
 
@@ -54,6 +55,7 @@ export function registerConvenienceTools(
     device_id?: string;
     observation_id?: string;
     require_fresh_observation: boolean;
+    bind_at_claim?: boolean;
     actions: Array<Record<string, unknown>>;
     opening_labels?: string[];
     include_screenshot: IncludeScreenshotMode;
@@ -153,7 +155,7 @@ export function registerConvenienceTools(
     "phone_type",
     {
       title: "Type Text",
-      description: "Type into the focused field or a referenced input. For a search, submit with result_texts to wait on-device for a known result or empty-state label.",
+      description: "Type directly into a referenced editable field: Poki focuses it before typing. A separate focus tap is unnecessary. For a search, submit with result_texts to wait on-device for a known result or empty-state label.",
       inputSchema: {
         ...commonOpts,
         text: z.string().min(1),
@@ -171,6 +173,27 @@ export function registerConvenienceTools(
         if (args.result_texts) {
           if (!args.submit) throw new Error("result_texts requires submit=true; nothing was sent.");
           if (args.ref === undefined) throw new Error("result_texts requires the current input field ref; nothing was sent.");
+          if (args.result_texts.some((label) => label.toLocaleLowerCase() === args.text.trim().toLocaleLowerCase())) {
+            throw new Error("result_texts requires labels distinct from the query; nothing was sent.");
+          }
+          const device = await resolveTargetDevice(env, args.device_id, true);
+          const observationId = args.observation_id ?? device.last_observation_id;
+          const observation = observationId && observationId === device.last_observation_id && supportsResultWait(device.app_version)
+            ? (await getObservationById(env.db, observationId))?.observation : null;
+          if (observation?.device_id === device.device_id && supportsLiveSearch(observation, args.ref)) {
+            const type = {
+              type: args.text, ref: args.ref,
+              ...(args.clear !== undefined ? { clear: args.clear } : {}),
+              ...(args.via !== undefined ? { via: args.via } : {}),
+            };
+            const wait = { wait_until: {
+              texts_any: args.result_texts,
+              present_before: searchMarkersPresentBefore(observation, args.result_texts),
+              ms: 5_000,
+            } };
+            return runDo({ ...args, device_id: device.device_id, observation_id: observationId!,
+              require_fresh_observation: true, bind_at_claim: true, actions: [type, wait] });
+          }
           const search = { text: args.text, ref: args.ref, clear: args.clear, via: args.via, result_texts: args.result_texts };
           return runDo({ ...args, require_fresh_observation: true, actions: [{ search_submit: search }] });
         }
@@ -186,7 +209,7 @@ export function registerConvenienceTools(
     "phone_open_app",
     {
       title: "Open App",
-      description: "Open an app and return its current screen. For a known low-risk destination, locate the entry on-device and stop on arrival or ambiguity. Include goal_key for a playbook tip with the first result.",
+      description: "Open an app and return its current screen. For a requested low-risk channel or entry, pass destination on the first call; Poki opens and enters it on the phone. Include goal_key for a playbook tip with the first result.",
       inputSchema: {
         device_id: commonOpts.device_id,
         app: z.string().trim().min(1),
@@ -194,7 +217,7 @@ export function registerConvenienceTools(
         destination: z.object({
           label: z.string().trim().min(1).max(120).describe("Exact navigation entry label on the opening screen (Poki 1.0.1+)."),
           type: z.string().trim().min(1).max(64).optional(),
-          ready_text: z.string().trim().min(1).max(120).describe("Distinct landmark specific to the destination page, not the entry label."),
+          ready_text: z.string().trim().min(1).max(120).optional().describe("Known distinct destination landmark. Omit when unknown; Poki 1.0.7+ can enter by label alone."),
         }).optional(),
         goal_key: goalKeySchema.optional(),
         include_screenshot: commonOpts.include_screenshot,
@@ -203,15 +226,29 @@ export function registerConvenienceTools(
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
     },
     ({ app, fresh, destination, goal_key, ...opts }) => wrapTool(async () => {
-      if (destination && destination.label.toLowerCase() === destination.ready_text.toLowerCase()) {
+      if (destination?.ready_text && destination.label.toLowerCase() === destination.ready_text.toLowerCase()) {
         throw new Error("Choose a ready_text specific to the destination page; nothing was sent.");
       }
-      const action = destination
+      let openOnly = false;
+      if (destination && !destination.ready_text) {
+        const phone = await resolveTargetDevice(env, opts.device_id, true);
+        opts.device_id = phone.device_id;
+        openOnly = !phone.app_version || phone.app_version.localeCompare("1.0.7", "en", { numeric: true }) < 0;
+      }
+      const action = destination && !openOnly
         ? { path: { goal: "Open destination", steps: [{ navigate: { app, destination, ...(fresh ? { fresh } : {}) } }] } }
         : { launch: fresh ? { bundle: app, fresh } : app };
-      const labels = !destination && opts.include_screenshot === "auto" ? openingLabels(app, goal_key) : undefined;
+      let labels: string[] | undefined;
+      if (opts.include_screenshot === "auto") {
+        if (openOnly && destination) labels = [destination.label];
+        else if (!destination) labels = openingLabels(app, goal_key);
+      }
       const pending = runDo({ ...opts, require_fresh_observation: false, actions: [action], opening_labels: labels }, false);
-      return markResponsePrepared(await attachOpeningGuide(pending, env.db, actor, app, goal_key), true);
+      const result = await attachOpeningGuide(pending, env.db, actor, app, goal_key);
+      if (openOnly) {
+        result.content.push({ type: "text", text: "Only app launch was requested on this Poki version. Choose the entry from the returned screen after launch succeeds." });
+      }
+      return markResponsePrepared(result, true);
     }),
   );
 }

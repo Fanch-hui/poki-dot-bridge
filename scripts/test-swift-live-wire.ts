@@ -13,7 +13,7 @@ async function invokeTool(client: Client, name: string, args: Record<string, unk
   };
 }
 
-async function waitForDeviceOnline(baseUrl: string, adminToken: string, timeoutMs = 15_000): Promise<string> {
+async function waitForDeviceOnline(baseUrl: string, adminToken: string, timeoutMs = 60_000): Promise<string> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const res = await fetch(`${baseUrl}/api/admin/devices`, {
@@ -38,6 +38,52 @@ async function waitForStandbyReceipt(client: Client, taskId: string) {
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   throw new Error("Timed out waiting for Poki to request automation standby");
+}
+
+function observationId(result: Awaited<ReturnType<typeof invokeTool>>) {
+  return (result.structured.observation as { observation_id: string }).observation_id;
+}
+
+async function compareSearch(client: Client, deviceId: string) {
+  const open = () => invokeTool(client, "phone_open_app", { device_id: deviceId, app: "DemoShop" });
+  const act = (observation_id: string, actions: unknown[]) => invokeTool(client, "phone_do", {
+    device_id: deviceId, observation_id, actions, include_screenshot: "always",
+  });
+  const shop = [{ tap: 3 }, { wait_until: "点菜" }];
+  const searchPage = [{ tap: 17 }, { wait_until: "请输入商品名" }];
+  const search = { search: { text: "tea", field: { label: "请输入商品名", type: "TextField" }, result_texts: ["Tea result"] } };
+
+  const start = observationId(await open());
+  const baselineStarted = performance.now();
+  const entered = await act(start, shop);
+  const openedSearch = await act(observationId(entered), searchPage);
+  const baseline = await act(observationId(openedSearch), [search]);
+  const baselineMs = Math.round(performance.now() - baselineStarted);
+  assert.equal(baseline.structured.status, "succeeded");
+  assert.ok(baseline.content.some(entry => entry.text?.includes("Tea result")));
+  assert.ok(typeof (openedSearch.structured.timing_ms as Record<string, unknown>).since_previous_device_result_received_ms === "number");
+
+  const nextStart = observationId(await open());
+  const searchTap = { tap: { label: "搜索", type: "Button" } };
+  const oldMarker = await act(nextStart, [{ tap: 3 }, { wait_until: "Shop" }, searchTap]);
+  assert.equal((oldMarker.structured.error as { code?: string }).code, "PAGE_MARKER_ALREADY_VISIBLE");
+  const batchedStarted = performance.now();
+  const batched = await act(nextStart, [
+    ...shop, searchTap, searchPage[1], search,
+  ]);
+  const batchedMs = Math.round(performance.now() - batchedStarted);
+  assert.deepEqual(batched.structured.batch, {
+    execution: "phone", completed: true, completed_stages: 3, total_stages: 3,
+  });
+  assert.equal((batched.structured.action_receipts as unknown[]).length, 6);
+  assert.equal(batched.content.filter((entry) => entry.type === "image").length, 1);
+  assert.match(batched.content[0]?.text ?? "", /Tea result/);
+  assert.match(batched.content[0]?.text ?? "", /sequence_timing_ms: stage=3 execution=\d+/);
+  assert.match(batched.content[0]?.text ?? "", /phone_timing_ms:/);
+  assert.equal((batched.structured.timing_ms as Record<string, unknown>).phone_final_read_ms, 42);
+  const readBack = await invokeTool(client, "phone_get_result", { task_id: batched.structured.task_id });
+  assert.deepEqual(readBack.structured.batch, batched.structured.batch);
+  console.log(`Search over loopback: 3 phone jobs / ${baselineMs} ms versus 1 phone job / ${batchedMs} ms.`);
 }
 
 async function main(): Promise<void> {
@@ -71,7 +117,7 @@ async function main(): Promise<void> {
         POKI_LIVE_TEST_URL: srv.url,
         POKI_LIVE_TEST_CODE: pairing_code,
         POKI_LIVE_TEST_SIWC: "optional_bypass_header_check",
-        POKI_LIVE_TEST_SECONDS: "8",
+        POKI_LIVE_TEST_SECONDS: "15",
       },
       stdio: ["ignore", "pipe", "pipe"],
     },
@@ -91,7 +137,10 @@ async function main(): Promise<void> {
   const mcp = new Client({ name: "swift-live-wire-dot", version: "1.0.0" });
 
   try {
-    const deviceId = await waitForDeviceOnline(srv.url, "swift-wire-admin");
+    const deviceId = await Promise.race([
+      waitForDeviceOnline(srv.url, "swift-wire-admin"),
+      swiftExit.then(code => { throw new Error(`Swift bridge exited before pairing (${code}):\n${swiftOut}`); }),
+    ]);
     console.log("1. Real Swift SitesBridgeController paired & online:", deviceId);
 
     await mcp.connect(transport);
@@ -129,6 +178,7 @@ async function main(): Promise<void> {
     });
     assert.equal(next.structured.status, "succeeded");
     console.log("4. Swift received standby and accepted the next task with the previous observation.");
+    await compareSearch(mcp, deviceId);
 
     const exitCode = await swiftExit;
     assert.equal(exitCode, 0, `swift test failed:\n${swiftOut}`);

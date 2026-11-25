@@ -1,11 +1,17 @@
 """Keep keyboard Return touches inside the current visible screen."""
 
 from pathlib import Path
+from shutil import copy2
 
 from patch_poki_ui import replace_once
 
 
-def patch_keyboard(source: Path) -> None:
+def patch_keyboard(bridge_root: Path, core: Path) -> None:
+    source = core / "Sources/PokiCore"
+    copy2(bridge_root / "ios/PokiAppIntegration/PokiSearchCandidates.swift", source)
+    tests = core / "Tests/PokiCoreTests"
+    if tests.is_dir():
+        copy2(bridge_root / "ios/PokiAppIntegration/PokiSearchCandidateTests.swift", tests)
     actions = source / "Actions.swift"
     replace_once(
         actions,
@@ -22,7 +28,13 @@ def patch_keyboard(source: Path) -> None:
                 case .visible(let go, let frame):
                     try await tap(frame.centre, within: frame)
                     return ("key", "key \(key): tapped the keyboard's \"\(go.text)\" key at [\(Int(frame.centre.x)), \(Int(frame.centre.y))]")
-                case .offscreen:
+                case .offscreen(let elements, let foreground):
+                    if let searchQuery, let (button, point) = searchSubmitButton(
+                        query: searchQuery, elements: elements, foreground: foreground, screen: screen
+                    ) {
+                        try await tap(point, within: button.frame)
+                        return ("key", "key \(key): tapped the visible \"\(button.text)\" search button at [\(Int(point.x)), \(Int(point.y))]")
+                    }
                     throw ActionFailure(message: "the keyboard's return key is outside the visible screen; choose a visible search or submit button", delivery: .notSent)
                 case .unlisted:
                     break
@@ -45,7 +57,7 @@ def patch_keyboard(source: Path) -> None:
     }''',
         '''    enum KeyboardReturnTarget {
         case visible(Element, Rect)
-        case offscreen
+        case offscreen([Element], Foreground)
         case unlisted
     }
 
@@ -53,7 +65,7 @@ def patch_keyboard(source: Path) -> None:
         guard let seen = try? await runner.tree(timeout: timeout, format: config.treeFormat) else { return .unlisted }
         let keys = Self.keyboardReturnKeys(in: seen.elements)
         guard !keys.isEmpty else { return .unlisted }
-        guard let key = Self.visibleReturnKey(in: keys, screen: screen) else { return .offscreen }
+        guard let key = Self.visibleReturnKey(in: keys, screen: screen) else { return .offscreen(seen.elements, seen.foreground) }
         return .visible(key.element, key.frame)
     }
 
@@ -81,6 +93,28 @@ def patch_keyboard(source: Path) -> None:
         "PokiCore validate keyboard Return candidates",
     )
     replace_once(
+        actions,
+        "    func perform(_ action: JSON, until: Double, backTarget: BackTarget? = nil) async throws -> (String, String) {",
+        "    func perform(_ action: JSON, until: Double, backTarget: BackTarget? = nil, searchQuery: String? = nil) async throws -> (String, String) {",
+        "PokiCore retain typed search context for return",
+    )
+    replace_once(
+        source / "Computer.swift",
+        '''            let began = now()
+            let givenUp = runner.actionsGivenUp.value''',
+        '''            let searchQuery = config.standaloneObservations && i > 0 && Self.isReturn(action) &&
+                did.last?.contains("(sent,") == true ? actions[i - 1]["type"]?.text : nil
+            let began = now()
+            let givenUp = runner.actionsGivenUp.value''',
+        "PokiCore bind return fallback to the preceding successful input",
+    )
+    replace_once(
+        source / "Computer.swift",
+        "try await perform(action, until: actionsUntil, backTarget: check.backTarget)",
+        "try await perform(action, until: actionsUntil, backTarget: check.backTarget, searchQuery: searchQuery)",
+        "PokiCore pass typed search context to return",
+    )
+    replace_once(
         source / "Computer.swift",
         '''    private func updateReadSize(until: Double) async {
         guard size == nil || runner.transport.usesDynamicScreenSize else { return }''',
@@ -93,4 +127,20 @@ def patch_keyboard(source: Path) -> None:
         "let key = Self.returnKey(in: reading.elements), let index = shown.firstIndex(of: key)",
         "let key = Self.returnKey(in: reading.elements, screen: screen), let index = shown.firstIndex(of: key)",
         "PokiCore show only an on-screen keyboard Return key",
+    )
+    replace_once(
+        source / "Computer.swift",
+        "let textsBefore = lastAll.filter { !$0.fromPicture && !Self.fieldTypes.contains($0.type) }.map(\\.text)",
+        "let elementsBefore = lastAll\n        let textsBefore = elementsBefore.filter { !$0.fromPicture && !Self.fieldTypes.contains($0.type) }.map(\\.text)",
+        "PokiCore retain the prior screen for search candidate evidence",
+    )
+    replace_once(
+        source / "Computer.swift",
+        '        if let line = sendCheck(toRun, error: error, textsBefore: textsBefore) { result.text += "\\n" + line }',
+        '''        if selectedPane == nil, searchCandidateAvailable(actions: toRun, did: did, error: error, before: before,
+                                                         elementsBefore: elementsBefore, result: result) {
+            result.text += "\\nsearch: input_sent; submit_not_sent; candidates_available"
+        }
+        if let line = sendCheck(toRun, error: error, textsBefore: textsBefore) { result.text += "\\n" + line }''',
+        "PokiCore report visible search candidates after an unsent return",
     )

@@ -61,6 +61,7 @@ public enum PokiOutputParser {
         }
         let lines = elementRecords(in: currentText)
         var appName: String?
+        var appBundleId: String?
         var screenWidth: Double?
         var screenHeight: Double?
         var screenLocked = false
@@ -84,7 +85,8 @@ public enum PokiOutputParser {
             if line.contains("what was sent is unknown") {
                 uncertainMessage = true
             }
-            if line.hasPrefix("launch_timing: ") {
+            if line.hasPrefix("launch_timing: ") || line.hasPrefix("sequence_timing_ms: ") ||
+                line.hasPrefix("screen_timing_ms: ") || line == "search: input_sent; submit_not_sent; candidates_available" {
                 notes.append(line)
                 continue
             }
@@ -94,6 +96,10 @@ public enum PokiOutputParser {
                 if let noteRange = raw.range(of: "note: ") {
                     notes.append(String(raw[noteRange.upperBound...]).trimmingCharacters(in: .whitespaces))
                 }
+                continue
+            }
+            if line.hasPrefix("bundle_id: "), appName != nil, appBundleId == nil, elements.isEmpty {
+                appBundleId = String(line.dropFirst("bundle_id: ".count))
                 continue
             }
             if line.hasPrefix("viewport: "), line.hasSuffix(" points") {
@@ -187,7 +193,7 @@ public enum PokiOutputParser {
         let validScreenWidth = screenWidth.flatMap { $0 > 0 ? $0 : nil }
         let obs = ObservationPayloadDTO(
             observation_id: nil,
-            app_bundle_id: nil,
+            app_bundle_id: appBundleId,
             app_name: appName,
             screen_width: validScreenWidth,
             screen_height: screenHeight,

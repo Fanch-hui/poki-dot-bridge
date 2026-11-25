@@ -5,6 +5,7 @@ import XCTest
 private final class SimulatedPokiCoreExecutor: PokiCoreExecuting, @unchecked Sendable {
     private let lock = NSLock()
     private var appName = "Home Screen"
+    private var shopPage = 0
 
     func currentRunnerState() async -> String {
         "automationReady"
@@ -26,22 +27,8 @@ private final class SimulatedPokiCoreExecutor: PokiCoreExecuting, @unchecked Sen
                 let tool = params["name"]?.stringValue ?? "look"
                 let args = params["arguments"]?.objectValue ?? [:]
 
-                if tool == "do",
-                   let actions = args["actions"]?.arrayValue,
-                   let first = actions.first?.objectValue,
-                   let launchTarget = first["launch"]?.stringValue {
-                    self.lock.withLock { self.appName = launchTarget }
-                }
-
-                let currentApp = self.lock.withLock { self.appName }
-                let text = """
-                app: \(currentApp)   read: 2026-11-22T08:00:00Z (42 ms)
-                screenshot: 402 px wide, 1 px = 1 screen point
-                screen_changed: true (the elements changed)
-                elements (2):
-                +1 Button "Wi-Fi = On" [16,120,370,44]
-                2 StaticText "\(currentApp) Ready" [16,180,260,32]
-                """
+                let actions = tool == "do" ? args["actions"]?.arrayValue ?? [] : []
+                let text = self.lock.withLock { self.screen(after: actions) }
                 let replyObj: [String: JSONValue] = [
                     "jsonrpc": .string("2.0"),
                     "id": .string(id),
@@ -63,6 +50,42 @@ private final class SimulatedPokiCoreExecutor: PokiCoreExecuting, @unchecked Sen
         return await adapter.execute(task: task)
     }
 
+    private func screen(after actions: [JSONValue]) -> String {
+        if let launch = actions.first?.objectValue?["launch"]?.stringValue {
+            appName = launch
+            shopPage = 0
+        }
+        var lines = ["app: \(appName)   read: 2026-11-22T08:00:00Z (42 ms)",
+                     "viewport: 402x874 points", "screen_changed: true"]
+        if appName != "DemoShop" {
+            return (lines + ["elements (2):", "1 Button \"Wi-Fi\" [16,120,370,44]",
+                             "2 StaticText \"\(appName) Ready\" [16,180,260,32]"]).joined(separator: "\n")
+        }
+        lines.append("bundle_id: com.example.shop")
+        if let first = actions.first?.objectValue {
+            switch (shopPage, first["tap"]?.intValue, first["type"]?.stringValue, first["ref"]?.intValue) {
+            case (0, 3, nil, nil):
+                shopPage = 1
+                lines += ["did: tap Shop (sent, 10 ms)", "did: wait_until: \"点菜\" appeared after 15 ms (sent, 15 ms)"]
+            case (1, 17, nil, nil):
+                shopPage = 2
+                lines += ["did: tap Search (sent, 10 ms)", "did: wait_until: \"请输入商品名\" appeared after 15 ms (sent, 15 ms)"]
+            case (2, nil, "tea", 29):
+                shopPage = 3
+                lines += ["did: type query (sent, 10 ms)", "did: wait_until: result \"Tea result\" appeared after 15 ms (sent, 15 ms)"]
+            default:
+                break
+            }
+        }
+        let pages = [
+            ["3 Cell \"Shop\" [16,250,370,44]"],
+            ["11 StaticText \"点菜\" [16,140,200,32]", "17 Button \"搜索\" [300,100,84,44]"],
+            ["29 TextField \"请输入商品名\" [16,100,290,44]"],
+            ["41 Cell \"Tea result\" [16,140,370,44]"],
+        ]
+        return (lines + ["elements (\(pages[shopPage].count)):"] + pages[shopPage]).joined(separator: "\n")
+    }
+
     func cancelActiveTask(taskId: String) async {}
 }
 
@@ -77,7 +100,7 @@ final class LiveServerWireTests: XCTestCase {
         let store = InMemoryCredentialStore()
         let executor = SimulatedPokiCoreExecutor()
         let controller = SitesBridgeController(
-            config: SitesBridgeConfig(defaultPollWaitMs: 1_500, heartbeatIntervalSeconds: 2),
+            config: SitesBridgeConfig(appVersion: "1.0.13", defaultPollWaitMs: 1_500, heartbeatIntervalSeconds: 2),
             store: store,
             executor: executor,
             transport: URLSessionHTTPTransport(),

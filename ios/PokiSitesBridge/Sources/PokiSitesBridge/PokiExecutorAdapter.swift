@@ -103,7 +103,6 @@ public final class PokiCoreJSONRPCAdapter: PokiCoreExecuting, @unchecked Sendabl
     public func execute(task: ClaimedTaskDTO) async -> PokiToolReply {
         let pokiToolName = task.tool_name == "status" ? "status" : (task.tool_name == "do" ? "do" : "look")
         let wantScreenshot = task.payload["want_screenshot"]?.boolValue ?? true
-        let cleanArgs = Self.sanitizeArguments(toolName: pokiToolName, payload: task.payload)
 
         if enableSessionHandshake {
             await ensureInitializedSession()
@@ -112,6 +111,22 @@ public final class PokiCoreJSONRPCAdapter: PokiCoreExecuting, @unchecked Sendabl
             return PokiToolReply(text: "cancelled: nothing was sent", isError: true)
         }
 
+        var reply: PokiToolReply
+        if pokiToolName == "do", task.payload["guarded_sequence"] != nil {
+            reply = await PokiGuardedSequence.execute(task: task) { [self] arguments, step in
+                await callTool(name: "do", id: "\(task.task_id)-\(step)", arguments: arguments)
+            }
+        } else {
+            let cleanArgs = Self.sanitizeArguments(toolName: pokiToolName, payload: task.payload)
+            reply = await callTool(name: pokiToolName, id: task.task_id, arguments: cleanArgs)
+        }
+        if !wantScreenshot {
+            reply.screenshotJPEG = nil
+        }
+        return reply
+    }
+
+    private func callTool(name: String, id: String, arguments: [String: JSONValue]) async -> PokiToolReply {
         var reqHeaders: [String: String] = ["x-poki-connector": connectorId]
         if let sid = currentSessionId {
             reqHeaders["mcp-session-id"] = sid
@@ -119,22 +134,18 @@ public final class PokiCoreJSONRPCAdapter: PokiCoreExecuting, @unchecked Sendabl
 
         let rpcPayload: [String: JSONValue] = [
             "jsonrpc": .string("2.0"),
-            "id": .string(task.task_id),
+            "id": .string(id),
             "method": .string("tools/call"),
             "params": .object([
-                "name": .string(pokiToolName),
-                "arguments": .object(cleanArgs),
+                "name": .string(name),
+                "arguments": .object(arguments),
             ]),
         ]
         let reqBody = JSONValue.object(rpcPayload).jsonString()
         let (_, resHeaders, body) = await sessionRPCHandler(reqBody, reqHeaders)
         captureSessionId(from: resHeaders)
 
-        var reply = Self.decodeToolReply(jsonText: body)
-        if !wantScreenshot {
-            reply.screenshotJPEG = nil
-        }
-        return reply
+        return Self.decodeToolReply(jsonText: body)
     }
 
     public func cancelActiveTask(taskId: String) async {

@@ -13,6 +13,11 @@ interface AuditRow {
 }
 
 export function redactActionPayload(payload: Record<string, unknown>): Record<string, unknown> {
+  if (Array.isArray(payload.guarded_sequence)) {
+    return { ...payload, guarded_sequence: payload.guarded_sequence.map(stage => stage.actions.map(
+      (action: Record<string, unknown>) => Object.keys(action)[0],
+    )) };
+  }
   if (!Array.isArray(payload.actions)) return payload;
   const actions = payload.actions.map((item) => {
     if (!item || typeof item !== "object") return item;
@@ -23,6 +28,11 @@ export function redactActionPayload(payload: Record<string, unknown>): Record<st
     if (copy.search_submit && typeof copy.search_submit === "object") {
       const search = copy.search_submit as Record<string, unknown>;
       copy.search_submit = { ref: search.ref, result_marker_count: Array.isArray(search.result_texts) ? search.result_texts.length : 0 };
+    }
+    if (copy.wait_until && typeof copy.wait_until === "object" &&
+        Array.isArray((copy.wait_until as Record<string, unknown>).texts_any)) {
+      const wait = copy.wait_until as { texts_any: unknown[]; ms?: unknown };
+      copy.wait_until = { result_marker_count: wait.texts_any.length, ms: wait.ms };
     }
     return copy;
   });

@@ -51,8 +51,13 @@ def patch_loading(bridge_root: Path, core: Path) -> None:
         "        var result = await readAndReply(until: until, full: full, changes: true, checkingTouch: checkingTouch, did: did, error: error, extra: (approvedNote.map { [$0] } ?? []) + extra)",
         '''        var result = await readAndReply(until: until, full: full, changes: true, checkingTouch: checkingTouch,
                                         did: did, error: error, extra: (approvedNote.map { [$0] } ?? []) + extra,
-                                        waitForLoadingAfterTap: config.standaloneObservations && actions.count == 1 &&
-                                            toRun.count == 1 && error == nil && steps.isEmpty && approvedNote == nil &&
-                                            moreKind == ActionKind.tap.rawValue)''',
+                                        waitForLoadingAfterTap: config.standaloneObservations &&
+                                            toRun.count == actions.count && error == nil &&
+                                            steps.isEmpty && approvedNote == nil &&
+                                            ((actions.count == 1 && moreKind == ActionKind.tap.rawValue) ||
+                                             (actions.contains { $0["type"] != nil } &&
+                                              actions.contains { Self.isReturn($0) } &&
+                                              (moreKind == ActionKind.key.rawValue ||
+                                               moreKind == ActionKind.waitUntil.rawValue))))''',
         "PokiCore wait only after a single successful low-risk tap",
     )

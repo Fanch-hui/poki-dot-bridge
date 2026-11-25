@@ -121,7 +121,7 @@ test("Repeated controls carry verified row context and request a screenshot when
   assert.ok(unresolved.content.some((item) => item.type === "image"));
   const unresolvedText = unresolved.content[0];
   assert.ok(unresolvedText.type === "text");
-  assert.match(unresolvedText.text, /use a point only if you can identify the intended row on the current screenshot/);
+  assert.match(unresolvedText.text, /the tool could not verify which item this control belongs to/);
   assert.match(unresolvedText.text, /2 Button "选规格" \[280,180,90,44\] \[row unverified\]/);
   const never = formatTaskOutcome(await getTaskResult(env, "tsk_unverified_rows", "never"));
   assert.equal(never.structuredContent?.screenshot_attached, false);
@@ -186,6 +186,28 @@ test("A failed tap returns the saved screenshot with auto and never repeats the 
   assert.ok(result.content.some((item) => item.type === "image"));
   const noScreenshot = formatTaskOutcome(await getTaskResult(env, "tsk_covered", "never"));
   assert.equal(noScreenshot.structuredContent?.screenshot_attached, false);
+});
+
+test("a named stage queued behind another operation cannot tap its superseded screen", async () => {
+  const { env, deviceId } = await setupPairedDevice();
+  const device = (await getDeviceById(env.db, deviceId))!.device;
+  const nowMs = Date.now();
+  for (const [i, id] of ["advance", "old-point"].entries()) {
+    await enqueueTask(env.db, {
+      taskId: id, deviceId, toolName: "do", actionSummary: "tap",
+      observationId: device.last_observation_id, payload: { actions: [{ tap: 1 }], bind_at_claim: true },
+      createdBy: "dot", expiresAt: nowMs + 60_000, nowMs: nowMs + i,
+    });
+  }
+  const first = (await pollDevice(env, device, { wait_ms: 0 })).task!;
+  assert.equal(first.task_id, "advance");
+  const request = DeviceResultRequestSchema.parse({
+    task_id: first.task_id, lease_token: first.lease_token, status: "succeeded",
+    observation: { app_name: "Shop", elements: [{ ref: 1, type: "Button", label: "Different item", frame: [12, 100, 60, 40] }] },
+  });
+  await submitDeviceResult(env, device, { ...request, approval_required: undefined, handoff_required: undefined });
+  assert.equal((await pollDevice(env, device, { wait_ms: 0 })).task, null);
+  assert.equal((await getTaskById(env.db, "old-point"))?.error_code, "STALE_OBSERVATION");
 });
 
 test("Concurrent polls claim only the highest-priority task, then resume in queue order", async () => {

@@ -6,6 +6,8 @@ import type {
   TaskRecord,
 } from "../../shared/types.ts";
 import { AppError } from "../http.ts";
+import { inputSubmission, isLiveSearchInput } from "./input-submission.ts";
+import { guardedBatch } from "./guarded-sequence.ts";
 import { deliveryChannelHint, verifiedOpeningEntry } from "../services/opening-entry.ts";
 import { CANCEL_ACK_PENDING_RESULT } from "../db/tasks-repo.ts";
 import type { ScreenshotData } from "../services/control-service.ts";
@@ -68,7 +70,7 @@ export function formatObservationText(
   const lines = includeHeader ? formatObservationHeader(obs) : [];
   if (obs.elements.length > 0) {
     if (obs.elements.some((el) => el.flags?.includes("row_unverified"))) {
-      lines.push("For [row unverified], use a point only if you can identify the intended row on the current screenshot. The numbered tap cannot confirm its target.");
+      lines.push("For [row unverified], the tool could not verify which item this control belongs to.");
     }
     lines.push("elements:");
     for (const el of obs.elements) {
@@ -212,10 +214,30 @@ export function formatTaskOutcome(data: {
   settle_poll_count?: number;
   screenshot_read_ms?: number;
   since_open_device_result_received_ms?: number;
+  since_previous_device_result_received_ms?: number;
   interstep_timing_unavailable?: boolean;
 }): CallToolResult {
   const formatStarted = Date.now();
-  const { task, observation, screenshot } = data;
+  const { screenshot } = data;
+  const clarify = (text: string) => text.replaceAll("search was submitted", "search input was sent; Return was not sent");
+  const task = isLiveSearchInput(data.task) ? {
+    ...data.task,
+    error_message: data.task.error_message ? clarify(data.task.error_message) : data.task.error_message,
+    result: data.task.result ? {
+      ...data.task.result,
+      summary: data.task.result.summary ? clarify(data.task.result.summary) : data.task.result.summary,
+      raw_text: data.task.result.raw_text ? clarify(data.task.result.raw_text) : data.task.result.raw_text,
+      action_receipts: data.task.result.action_receipts?.map((receipt) => ({
+        ...receipt, ...(receipt.detail ? { detail: clarify(receipt.detail) } : {}),
+      })),
+    } : data.task.result,
+  } : data.task;
+  const observation = isLiveSearchInput(data.task) && data.observation
+    ? { ...data.observation, raw_text: clarify(data.observation.raw_text) } : data.observation;
+  const submission = inputSubmission(task, observation);
+  const batch = guardedBatch(task);
+  const unmetWaits = unmetWaitActions(task);
+  const unconfirmedInputActions = unconfirmedInputSteps(task);
   const queueWaitMs =
     task.claimed_at !== null ? Math.max(0, task.claimed_at - task.created_at) : null;
   const deviceExecMs =
@@ -223,11 +245,19 @@ export function formatTaskOutcome(data: {
       ? Math.max(0, task.completed_at - task.claimed_at)
       : null;
   const totalMs = Math.max(0, (task.completed_at ?? Date.now()) - task.created_at);
+  const raw = task.result?.raw_text ?? "";
+  const currentRaw = raw.startsWith("earlier, never delivered to you: ") && raw.includes("\n\nnow:\n")
+    ? raw.slice(raw.lastIndexOf("\n\nnow:\n") + 7) : raw;
+  const sentWithUnconfirmedScreen = task.status === "failed" && !task.uncertain_execution &&
+    task.result?.action_receipts?.some(receipt => receipt.status === "sent") &&
+    currentRaw.startsWith("the action was sent, but the current screen is not yet confirmed.");
+  const finalRead = /^app: [^\n]+? {3}read: [^\n]+? \((\d+) ms\)/m.exec(raw);
   const timingMs = {
     request_received_at_ms: task.created_at,
     queue_wait_ms: queueWaitMs,
     device_exec_ms: deviceExecMs,
     total_ms: totalMs,
+    ...(finalRead ? { phone_final_read_ms: Number(finalRead[1]) } : {}),
     ...(task.status === "succeeded" && task.claimed_at !== null && task.completed_at !== null
       ? { device_result_received_at_ms: task.completed_at } : {}),
     ...(data.live_execution && data.settled_observed_at_ms !== undefined
@@ -238,15 +268,29 @@ export function formatTaskOutcome(data: {
       ? { screenshot_read_ms: data.screenshot_read_ms } : {}),
     ...(data.since_open_device_result_received_ms !== undefined
       ? { since_open_device_result_received_ms: data.since_open_device_result_received_ms } : {}),
+    ...(data.since_previous_device_result_received_ms !== undefined
+      ? { since_previous_device_result_received_ms: data.since_previous_device_result_received_ms } : {}),
   };
 
   const lines: string[] = [
     `task_id: ${task.task_id}`,
     `status: ${task.status}`,
+    ...(sentWithUnconfirmedScreen
+      ? ["screen_confirmation: unconfirmed after input was sent. Read the current screen to verify the result before continuing."]
+      : []),
+    ...(batch ? [`batch: ${batch.completed_stages}/${batch.total_stages} stages verified on the phone`] : []),
+    ...(unconfirmedInputActions.length > 0
+      ? [`input_confirmation: unconfirmed. Action(s) ${unconfirmedInputActions.map((index) => index + 1).join(", ")} sent text, but focus and field contents could not be confirmed. Inspect the current screen before continuing; do not repeat sent input blindly.`]
+      : []),
+    ...(unmetWaits.length ? ["wait_condition: unmet. The wait finished but the requested condition was not observed."] : []),
+    ...(submission ? [`input_submission: ${submission.state}. ${submission.message}`] : []),
     `timing_ms: queue=${queueWaitMs ?? "-"} exec=${deviceExecMs ?? "-"} total=${totalMs}`,
+    ...(finalRead ? [`timing_ms: phone_final_read=${finalRead[1]}`] : []),
   ];
   if (data.since_open_device_result_received_ms !== undefined) {
     lines.push(`timing_ms: since_open_device_result_received=${data.since_open_device_result_received_ms} (server receipt of phone result to next request)`);
+  } else if (data.since_previous_device_result_received_ms !== undefined) {
+    lines.push(`timing_ms: since_previous_device_result_received=${data.since_previous_device_result_received_ms} (server receipt of phone result to next request)`);
   }
   if (data.interstep_timing_unavailable) {
     lines.push("timing_ms: interstep timing unavailable");
@@ -267,8 +311,9 @@ export function formatTaskOutcome(data: {
 
   if (
     (task.tool_name === "look" || task.tool_name === "do") && task.status === "succeeded" &&
-    !task.uncertain_execution && task.cancel_requested_at === null && task.error_code === null &&
-    !task.result?.approval_required && !task.result?.handoff_required
+    !task.uncertain_execution && unconfirmedInputActions.length === 0 && unmetWaits.length === 0 &&
+    task.cancel_requested_at === null && task.error_code === null &&
+    !task.result?.approval_required && !task.result?.handoff_required && (!batch || batch.completed)
   ) {
     lines.push(
       `closeout: If the whole user task is done, call phone_finish_task(last_task_id="${task.task_id}") before replying. ` +
@@ -337,11 +382,10 @@ export function formatTaskOutcome(data: {
       lines.push(`  [${r.index}] ${r.kind}: ${r.status}${r.detail ? ` (${r.detail})` : ""}`);
     }
   }
-  const raw = task.result?.raw_text ?? "";
   const separated = raw && observation ? separateRawElements(raw, observation) : null;
-  if (raw) {
+  if (raw && !batch) {
     lines.push(`poki_output:\n${separated?.text ?? raw}`);
-  } else if (task.result?.summary) {
+  } else if (!batch && task.result?.summary) {
     lines.push(`summary: ${task.result.summary}`);
   }
   if (observation) {
@@ -379,7 +423,14 @@ export function formatTaskOutcome(data: {
       uncertain_execution: task.uncertain_execution,
       error_code: task.error_code,
       error_message: task.error_message,
+      ...(sentWithUnconfirmedScreen ? { screen_confirmation: "unconfirmed_after_send" } : {}),
       action_receipts: task.result?.action_receipts ?? [],
+      ...(batch ? { batch } : {}),
+      ...(submission ? { input_submission: submission.state } : {}),
+      ...(unmetWaits.length ? { wait_condition: "unmet", unmet_wait_actions: unmetWaits } : {}),
+      ...(unconfirmedInputActions.length > 0
+        ? { input_confirmation: "unconfirmed", unconfirmed_input_actions: unconfirmedInputActions }
+        : {}),
       approval_required: task.result?.approval_required ?? null,
       handoff_required: task.result?.handoff_required ?? null,
       observation: observation ?? null,
@@ -394,6 +445,21 @@ export function formatTaskOutcome(data: {
     },
     isError,
   };
+}
+
+export function unmetWaitActions(task: TaskRecord): number[] {
+  return (task.result?.action_receipts ?? []).filter(receipt =>
+    receipt.kind.startsWith("wait_until") &&
+    /^wait_until: (?:not seen within |the owner is not done yet )/.test(receipt.detail ?? "")
+  ).map(receipt => receipt.index);
+}
+
+export function unconfirmedInputSteps(task: TaskRecord): number[] {
+  return (task.result?.action_receipts ?? [])
+    .filter((receipt) => receipt.kind === "type" && receipt.status === "sent" &&
+      receipt.detail?.includes("the field could not be read back") &&
+      receipt.detail.includes("no field was focused when the text went"))
+    .map((receipt) => receipt.index);
 }
 
 export function markResponsePrepared(result: CallToolResult, opening = false): CallToolResult {

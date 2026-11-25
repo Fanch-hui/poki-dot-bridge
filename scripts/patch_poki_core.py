@@ -10,6 +10,7 @@ from patch_poki_overlay import patch_overlay
 from patch_poki_reach import patch_reach
 from patch_poki_startup import patch_startup
 from patch_poki_tap_latency import patch_tap_latency
+from patch_poki_wait_reuse import patch_wait_reuse
 from patch_poki_ui import replace_once
 
 
@@ -24,6 +25,9 @@ def patch_core_safety(bridge_root: Path, poki_root: Path) -> None:
     patch_observations(source)
     copy2(bridge_root / "ios/PokiAppIntegration/PokiPageVisibility.swift", source)
     copy2(bridge_root / "ios/PokiAppIntegration/PokiControlTargets.swift", source)
+    copy2(bridge_root / "ios/PokiAppIntegration/PokiDismissalEvidence.swift", source)
+    copy2(bridge_root / "ios/PokiAppIntegration/PokiPointTargets.swift", source)
+    copy2(bridge_root / "ios/PokiAppIntegration/PokiSearchFieldIdentity.swift", source)
     copy2(bridge_root / "ios/PokiAppIntegration/PokiSensitiveContext.swift", source)
     patch_control_targets(computer)
     patch_sensitive_context(source)
@@ -31,8 +35,9 @@ def patch_core_safety(bridge_root: Path, poki_root: Path) -> None:
     patch_navigation(bridge_root, core)
     patch_loading(bridge_root, core)
     patch_startup(bridge_root, core)
-    patch_keyboard(source)
+    patch_keyboard(bridge_root, core)
     patch_tap_latency(bridge_root, core)
+    patch_wait_reuse(bridge_root, core)
     replace_once(
         computer,
         r"""                    return ToolResult(text: "cancelled: the caller stopped waiting before the owner answered; nothing was sent from action \(at + 1).", jpeg: nil, isError: true)""",
@@ -70,6 +75,12 @@ def patch_core_safety(bridge_root: Path, poki_root: Path) -> None:
         copy2(bridge_root / "ios/PokiAppIntegration/PokiCoreSafetyTests.swift", tests)
         copy2(bridge_root / "ios/PokiAppIntegration/PokiObservationTests.swift", tests)
         copy2(bridge_root / "ios/PokiAppIntegration/PokiControlTargetTests.swift", tests)
+        copy2(bridge_root / "ios/PokiAppIntegration/PokiDismissalEvidenceTests.swift", tests)
+        copy2(bridge_root / "ios/PokiAppIntegration/PokiPointTargetsTests.swift", tests)
+        copy2(bridge_root / "ios/PokiAppIntegration/PokiSearchFieldIdentityTests.swift", tests)
+        copy2(bridge_root / "ios/PokiAppIntegration/PokiGridCellTests.swift", tests)
+        copy2(bridge_root / "ios/PokiAppIntegration/PokiNamedCardIdentityTests.swift", tests)
+        copy2(bridge_root / "ios/PokiAppIntegration/PokiNavigationBarReachabilityTests.swift", tests)
 
 
 def patch_transaction_activity(approvals: Path) -> None:
@@ -176,8 +187,10 @@ def patch_control_targets(computer: Path) -> None:
         """            let check = moved
                 ? await pressNow(action, after: changed, approved: approved[index], until: until - config.readTimeout - 0.5)""",
         """            let targets = targetsToVerify(action)
-            let check = moved || !targets.isEmpty
-                ? await pressNow(action, after: changed, moved: moved, targets: targets, approved: approved[index], until: until - config.readTimeout - 0.5)""",
+            let pointTarget = pointTargetToVerify(action)
+            let check = moved || !targets.isEmpty || pointTarget.requiresVerification
+                ? await pressNow(action, after: changed, moved: moved, targets: targets,
+                                 pointTarget: pointTarget, approved: approved[index], until: until - config.readTimeout - 0.5)""",
         "PokiCore verify numbered touches before dispatch",
     )
     replace_once(
@@ -186,9 +199,12 @@ def patch_control_targets(computer: Path) -> None:
         let rules = config.rules
         guard let kind = ActionKind(action), kind.presses(action), rules.enabled || kind == .back else { return (nil, nil) }""",
         """    func pressNow(_ action: JSON, after changed: (kind: String, at: Double)?, moved: Bool,
-                  targets: [(ref: Int, element: Element)], approved: String?, until: Double) async -> (problem: String?, backTarget: BackTarget?) {
+                  targets: [(ref: Int, element: Element)], pointTarget: PokiPointTargetSelection,
+                  approved: String?, until: Double) async -> (problem: String?, backTarget: BackTarget?) {
         let rules = config.rules
-        guard let kind = ActionKind(action), kind.presses(action), rules.enabled || kind == .back || !targets.isEmpty else { return (nil, nil) }""",
+        if case .blocked(let problem) = pointTarget { return (problem, nil) }
+        guard let kind = ActionKind(action), kind.presses(action),
+              rules.enabled || kind == .back || !targets.isEmpty || pointTarget.requiresVerification else { return (nil, nil) }""",
         "PokiCore require reference verification independent of approval settings",
     )
     replace_once(
@@ -206,11 +222,19 @@ def patch_control_targets(computer: Path) -> None:
         } else {
             elements = nil
         }
-        guard let screen = size, let elements else {
+        guard let screen = size, var elements else {
             return ("the current screen could not be confirmed. Choose the remaining actions from the fresh screen below and send them in a new do", nil)
         }
-        if let problem = controlProblem(targets, in: elements.all, foreground: elements.foreground, screen: screen) {
+        if case .guarded(let target) = pointTarget,
+           let problem = pointTargetProblem(target, in: elements.all, foreground: elements.foreground, screen: screen) {
             return (problem, nil)
+        }
+        if let problem = controlProblem(targets, in: elements.all, foreground: elements.foreground, screen: screen) {
+            guard selectedPane == nil, elements.foreground.bundleID == lastForeground?.bundleID,
+                  let dismissal = await recheckCircularDismissal(targets, kind: kind, screen: screen, until: until) else {
+                return (problem, nil)
+            }
+            elements = dismissal
         }""",
         "PokiCore recheck row identity and position against a live tree",
     )

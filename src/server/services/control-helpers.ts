@@ -207,8 +207,9 @@ export async function waitForTaskSettle(
     const active = task.status === "claimed" || task.status === "running";
     const actions = task.payload.actions;
     const shortScreenStep = task.tool_name === "look" || ordinaryLaunch ||
-      (Array.isArray(actions) && actions.length === 1 && actions[0] &&
-        typeof actions[0] === "object" && ("tap" in actions[0] || "swipe" in actions[0]));
+      (Array.isArray(actions) && actions[0] && typeof actions[0] === "object" &&
+        ((actions.length === 1 && ("tap" in actions[0] || "swipe" in actions[0])) ||
+          (actions.length === 2 && "tap" in actions[0] && actions[1]?.wait_until !== undefined)));
     let sliceMs = 600;
     if (elapsed < 2_000 || (elapsed < 6_000 && active && shortScreenStep)) {
       sliceMs = TASK_LIMITS.MCP_POLL_SLICE_MS;

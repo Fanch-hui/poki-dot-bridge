@@ -66,7 +66,7 @@ final class PokiCoreSafetyTests: XCTestCase {
 
     func testMerchantPromotionsDoNotRequirePaymentApproval() async {
         let cards: [(String, String, JSON)] = [
-            ("Other", "示例茶饮(示例广场店)\n月售9999+\n起送 ¥25\n配送 约¥4.1\n支付再减\n0.2元", 1),
+            ("Other", "喜茶(广州GOGO新天地店)\n月售9999+\n起送 ¥25\n配送 约¥4.1\n支付再减\n0.2元", 1),
             ("Button", "商店, 月售999+, 配送 ¥3, 支付再减, 0.2元, 进店", [150, 125]),
             ("Button", "店铺活动：支付再减、0.2元", 1),
             ("Other", "门店 月售300+ 配送 ¥3 支付立减5元", 1),

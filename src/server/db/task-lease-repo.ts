@@ -142,7 +142,14 @@ export async function claimNextTask(
   },
 ): Promise<TaskRecord | null> {
   const leaseExpiresAt = params.nowMs + params.leaseSeconds * 1000;
-  const [claim] = await db.batch<TaskRow>([
+  const [, claim] = await db.batch<TaskRow>([
+    db.prepare(
+      `UPDATE tasks SET status = 'failed', error_code = 'STALE_OBSERVATION',
+         error_message = 'The screen changed before this stage was claimed; nothing was sent.',
+         completed_at = ?2, updated_at = ?2
+       WHERE device_id = ?1 AND status = 'queued' AND json_extract(payload_json, '$.bind_at_claim') = 1
+         AND observation_id IS NOT (SELECT last_observation_id FROM devices WHERE device_id = ?1)`,
+    ).bind(params.deviceId, params.nowMs),
     db.prepare(
       `UPDATE tasks
        SET status = 'claimed', claimed_by_generation = ?1, lease_token = ?2,

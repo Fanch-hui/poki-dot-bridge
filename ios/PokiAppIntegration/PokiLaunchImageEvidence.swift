@@ -6,6 +6,60 @@ import ImageIO
 
 /// A launch image can precede an otherwise current accessibility tree.
 enum PokiLaunchImageEvidence {
+    struct ChangedLabel {
+        let before: String
+        let after: String
+        let beforeFrame: Rect
+        let afterFrame: Rect
+    }
+
+    /// Find text that changed at the same screen position, such as a selected option summary.
+    static func changedLabels(before: [Element], after: [Element], screen: ScreenSize) -> [ChangedLabel] {
+        let viewport = Rect(x: 0, y: 0, width: screen.width, height: screen.height)
+        func usable(_ element: Element) -> Bool {
+            guard ["StaticText", "Button"].contains(element.type), !element.fromPicture,
+                  normalized(element.text).count >= 6 else { return false }
+            return !element.frame.isEmpty && element.frame.intersection(viewport).area >= element.frame.area * 0.9
+        }
+        func samePosition(_ first: Element, _ second: Element) -> Bool {
+            first.type == second.type && first.frame.intersection(second.frame).area >= max(first.frame.area, second.frame.area) * 0.8
+        }
+        let previous = before.filter(usable)
+        let current = after.filter(usable)
+        return current.compactMap { element in
+            guard current.filter({ samePosition($0, element) }).count == 1 else { return nil }
+            let candidates = previous.filter { samePosition($0, element) }
+            guard candidates.count == 1, let old = candidates.first else { return nil }
+            let oldText = normalized(old.text), newText = normalized(element.text)
+            guard oldText != newText else { return nil }
+            return ChangedLabel(before: oldText, after: newText, beforeFrame: old.frame, afterFrame: element.frame)
+        }
+    }
+
+    /// Both screenshots must show their own distinct version of the changed text in its frame.
+    static func confirmsChangedLabel(_ labels: [ChangedLabel], before: [RecognizedText],
+                                     after: [RecognizedText], screen: ScreenSize) -> Bool {
+        labels.contains { label in
+            witness(in: before, frame: label.beforeFrame, text: label.before, other: label.after, screen: screen) &&
+                witness(in: after, frame: label.afterFrame, text: label.after, other: label.before, screen: screen)
+        }
+    }
+
+    private static func witness(in texts: [RecognizedText], frame: Rect, text: String, other: String,
+                                screen: ScreenSize) -> Bool {
+        texts.contains { item in
+            let value = normalized(item.text)
+            guard value.count >= 6, text.contains(value), !other.contains(value) else { return false }
+            let box = Rect(x: item.box.x * screen.width, y: item.box.y * screen.height,
+                           width: item.box.width * screen.width, height: item.box.height * screen.height)
+            return !box.isEmpty && frame.intersection(box).area >= box.area * 0.8
+        }
+    }
+
+    private static func normalized(_ text: String) -> String {
+        String(text.lowercased().filter { $0.isLetter || $0.isNumber })
+    }
+
     static func hasMissingLabels(_ reading: Reading, screen: ScreenSize) -> Bool {
         #if canImport(CoreGraphics) && canImport(ImageIO)
         guard let png = reading.png, screen.width > 0, screen.height > 0 else { return false }

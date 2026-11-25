@@ -54,6 +54,21 @@ test("A screen and its original annotations appear once while diagnostics stay a
   assert.equal((formatted.structuredContent?.observation as ObservationRecord).observation_id, "obs_1");
 });
 
+test("A sent specification tap and its unconfirmed screen are reported separately", () => {
+  const message = "the action was sent, but the current screen is not yet confirmed. Look again before acting; do not repeat the action.";
+  const sent = { ...task(`${message}\ndid: tap tap "默认规格" (sent, 661 ms)`, "failed"), error_code: "POKI_ERROR" };
+  const read = { ...observation, app_name: null, app_bundle_id: null, elements: [] };
+  const response = formatTaskOutcome({ task: sent, observation: read, screenshot: null });
+  assert.equal(response.structuredContent?.status, "failed");
+  assert.equal(response.structuredContent?.screen_confirmation, "unconfirmed_after_send");
+  assert.equal(response.isError, false);
+  assert.match(JSON.stringify(response.content), /Read the current screen to verify the result/);
+
+  const oldReceipt = task(`earlier, never delivered to you: ${message}\n\nnow:\nerror: action 1 was not sent`, "failed");
+  const current = formatTaskOutcome({ task: oldReceipt, observation: null, screenshot: null });
+  assert.equal(current.structuredContent?.screen_confirmation, undefined);
+});
+
 test("An approval screen records observed return phases without inferring a terminal receipt", () => {
   const info = console.info;
   let event: Record<string, unknown> | undefined;
@@ -176,4 +191,83 @@ test("Failures and covered controls attach an available screenshot in auto mode"
   assert.equal(shouldAttachScreenshot("auto", clear, false, true), true);
   assert.equal(shouldAttachScreenshot("never", clear, false, true), false);
   assert.equal(shouldAttachScreenshot("auto", { ...clear, has_screenshot: false }, false, true), false);
+});
+
+test("Typing and Return are reported separately, including independently confirmed search candidates", () => {
+  const request = task("", "failed");
+  request.payload = { actions: [{ type: "Museum" }, { key: "return" }] };
+  const receipts = [
+    { index: 0, kind: "type", status: "sent" as const },
+    { index: 1, kind: '{"key":"return"}', status: "not_sent" as const },
+  ];
+  request.result!.action_receipts = receipts;
+  const obs = { ...observation, notes: ["search: input_sent; submit_not_sent; candidates_available"] };
+  const report = (o: ObservationRecord) => formatTaskOutcome({ task: request, observation: o, screenshot: null });
+  const candidates = report(obs);
+  assert.equal(candidates.structuredContent?.input_submission, "candidates_available");
+  assert.deepEqual(candidates.structuredContent?.action_receipts, receipts);
+  assert.match(candidates.content[0].type === "text" ? candidates.content[0].text : "", /Return was not sent.*Choose/);
+  assert.equal(report(observation).structuredContent?.input_submission, "return_not_sent");
+  request.uncertain_execution = true;
+  assert.equal(report(obs).structuredContent?.input_submission, undefined);
+  request.uncertain_execution = false;
+  request.payload = { actions: [{ search_submit: { text: "Museum", ref: 1, result_texts: ["Results"] } }] };
+  request.result!.action_receipts = [receipts[0], { index: 1, kind: "key", status: "sent" }];
+  assert.equal(report(obs).structuredContent?.input_submission, "return_sent");
+  request.result!.action_receipts[1].detail = 'key return: tapped the visible "搜索" search button at [310,84] (sent, 150 ms)';
+  assert.equal(report(obs).structuredContent?.input_submission, "search_button_sent");
+});
+
+
+test("Unconfirmed sent input is exposed without a retry or task closeout", () => {
+  const input = task("");
+  input.payload = { actions: [{ type: "tea" }] };
+  input.result!.action_receipts = [{
+    index: 0, kind: "type", status: "sent",
+    detail: 'type "tea" (typed); the field could not be read back (no focused field answered in time), so check the elements or the picture; no field was focused when the text went (no keyboard came up in 2000 ms), so it may have gone nowhere (sent, 3743 ms)',
+  }];
+  const response = formatTaskOutcome({ task: input, observation, screenshot: null });
+  const text = response.content[0].type === "text" ? response.content[0].text : "";
+  assert.equal(response.structuredContent?.input_confirmation, "unconfirmed");
+  assert.deepEqual(response.structuredContent?.unconfirmed_input_actions, [0]);
+  assert.equal(response.structuredContent?.status, "succeeded");
+  assert.equal(response.isError, false);
+  assert.match(text, /do not repeat sent input blindly/);
+  assert.doesNotMatch(text, /closeout:/);
+
+  input.result!.action_receipts![0].detail = 'type "tea" (typed); the field now reads "tea" (sent, 200 ms)';
+  const confirmed = formatTaskOutcome({ task: input, observation, screenshot: null });
+  assert.equal(confirmed.structuredContent?.input_confirmation, undefined);
+  assert.match(confirmed.content[0].type === "text" ? confirmed.content[0].text : "", /closeout:/);
+});
+
+test("Live search reports actual input and results without claiming a Return", () => {
+  const input = task("");
+  input.payload = { actions: [{ type: "tea", ref: 1 }, { wait_until: { texts_any: ["Results"], present_before: [], ms: 5000 } }] };
+  input.result!.action_receipts = [
+    { index: 0, kind: "type", status: "sent", detail: 'type "tea" (sent, 300 ms)' },
+    { index: 1, kind: "wait_until:", status: "sent", detail: 'wait_until: result "Results" appeared (sent, 500 ms)' },
+  ];
+  const success = formatTaskOutcome({ task: input, observation, screenshot: null });
+  assert.equal(success.structuredContent?.input_submission, "live_results_available");
+  assert.match(success.content[0].type === "text" ? success.content[0].text : "", /Return was not sent/);
+
+  input.status = "failed";
+  input.error_message = "action 2 was not sent: search was submitted; result labels did not appear";
+  input.result!.raw_text = "error: search was submitted; result labels did not appear";
+  input.result!.action_receipts[1] = { index: 1, kind: "wait_until:", status: "not_sent" };
+  const failed = formatTaskOutcome({ task: input, observation: { ...observation, raw_text: input.result!.raw_text }, screenshot: null });
+  assert.equal(failed.structuredContent?.input_submission, "live_results_unconfirmed");
+  assert.match(String(failed.structuredContent?.error_message), /Return was not sent/);
+  assert.doesNotMatch(JSON.stringify(failed), /search was submitted/);
+  assert.match(failed.content[0].type === "text" ? failed.content[0].text : "", /do not repeat the input/);
+});
+
+test("a sent wait that timed out is not a confirmed screen condition", () => {
+  const run = task("", "succeeded");
+  run.result!.action_receipts = [{ index: 1, kind: "wait_until:", status: "sent", detail: 'wait_until: not seen within 3000 ms that "Selected" appeared (4 reads) (sent, 3010 ms)' }];
+  const out = formatTaskOutcome({ task: run, observation, screenshot: null });
+  assert.equal(out.structuredContent?.wait_condition, "unmet");
+  assert.deepEqual(out.structuredContent?.unmet_wait_actions, [1]);
+  assert.doesNotMatch(out.content[0].type === "text" ? out.content[0].text : "", /closeout:/);
 });

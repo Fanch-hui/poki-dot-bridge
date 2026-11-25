@@ -614,6 +614,48 @@ test("Unauthorized POST /mcp returns 401 and logs non-secret mcp_auth_rejected a
   }
 });
 
+test("a multi-page batch rebinds labels on each screen and stops before a missing step", async () => {
+  const { srv, phone, mcp } = await createConnectedMcpHarness();
+  try {
+    const open = () => invokeTool(mcp, "phone_open_app", { app: "Settings", include_screenshot: "never" });
+    const run = (observation: ObservationRecord, actions: unknown[]) => invokeTool(mcp, "phone_do", {
+      observation_id: observation.observation_id, actions, include_screenshot: "always",
+    });
+    const settings = (await open()).structured.observation as ObservationRecord;
+    const unsafe = await run(settings, [{ tap: 2 }, { wait_until: "Back" }, { tap: [60, 60] }]);
+    assert.equal(unsafe.isError, true);
+    assert.match(unsafe.content[0].text ?? "", /Step 3.*Nothing was sent/);
+    const rejected = unsafe.structured.error as Record<string, unknown>;
+    assert.equal(rejected.code, "CROSS_PAGE_POINT");
+    assert.equal(rejected.step, 3);
+    assert.equal(rejected.nothing_sent, true);
+    const result = await run(settings, [
+      { tap: { label: "Wi-Fi", type: "Cell" } }, { wait_until: "Back" }, { tap: { label: "Back", type: "Button" } },
+    ]);
+    const batch = result.structured.batch as { completed: boolean; stages: Array<{ receipts: Array<{ detail: string }> }> };
+    assert.equal(batch.completed, true);
+    assert.deepEqual(batch.stages.map(stage => stage.receipts[0].detail), ["tapped 2", "tapped 1"]);
+    assert.equal(result.content.filter(part => part.type === "image").length, 1);
+    const again = (await open()).structured.observation as ObservationRecord;
+    const unchanged = await run(again, [{ tap: { label: "Wi-Fi", if_needed: true } }, { wait_until: "Bluetooth" }]);
+    const alreadySet = unchanged.structured.batch as { completed: boolean; stages: Array<{ skipped_tap_step: number; receipts: Array<{ kind: string }> }> };
+    assert.equal(alreadySet.completed, true);
+    assert.equal(alreadySet.stages[0].skipped_tap_step, 1);
+    assert.deepEqual(alreadySet.stages[0].receipts.map(r => r.kind), ["wait_until"]);
+    const partial = await run(unchanged.structured.observation as ObservationRecord, [{ tap: 2 }, { tap: { label: "Bluetooth" } }]);
+    const stopped = partial.structured.batch as { completed: boolean; stages: unknown[]; reason: string };
+    assert.equal(stopped.completed, false);
+    assert.equal(stopped.stages.length, 1);
+    assert.match(stopped.reason, /before step 2: TARGET_NOT_UNIQUE/);
+    assert.ok(partial.structured.observation);
+    assert.equal(partial.structured.screenshot_attached, true);
+  } finally {
+    await phone.stop();
+    await mcp.close();
+    await srv.close();
+  }
+});
+
 test("opening guidance and guarded navigation or search use one phone job", async () => {
   const { srv, phone, mcp } = await createConnectedMcpHarness();
   try {
@@ -629,6 +671,14 @@ test("opening guidance and guarded navigation or search use one phone job", asyn
     assert.deepEqual(launch?.payload.actions, [{
       path: { goal: "Open destination", steps: [{ navigate: { app: "Shop", destination } }] },
     }]);
+    const entry = { label: "Channels" };
+    const oldPhone = await invokeTool(mcp, "phone_open_app", { app: "Shop", destination: entry, wait_timeout_ms: 0 });
+    assert.deepEqual((await getTaskById(db, String(oldPhone.structured.task_id)))?.payload.actions, [{ launch: "Shop" }]);
+    await db.prepare("UPDATE devices SET app_version = ? WHERE device_id = ?").bind("1.0.7", launch!.device_id).run();
+    const byLabel = await invokeTool(mcp, "phone_open_app", { app: "Shop", destination: entry, wait_timeout_ms: 0 });
+    assert.deepEqual((await getTaskById(db, String(byLabel.structured.task_id)))?.payload.actions, [{
+      path: { goal: "Open destination", steps: [{ navigate: { app: "Shop", destination: entry } }] },
+    }]);
     const search = { text: "grapes", ref: 2, result_texts: ["Results", "No results"] };
     const submitted = await invokeTool(mcp, "phone_type", { ...search, submit: true, wait_timeout_ms: 0 });
     const task = await getTaskById(db, String(submitted.structured.task_id));
@@ -643,6 +693,57 @@ test("opening guidance and guarded navigation or search use one phone job", asyn
       app: "Shop", destination: { label: "Shop", ready_text: "Shop" },
     });
     assert.equal(invalidDestination.isError, true);
+  } finally {
+    await phone.stop();
+    await mcp.close();
+    await srv.close();
+  }
+});
+
+test("A contextual search field waits for new results on the installed phone", async () => {
+  const { srv, phone, mcp } = await createConnectedMcpHarness();
+  try {
+    const looked = await invokeTool(mcp, "phone_look", { include_screenshot: "always" });
+    const observationId = (looked.structured.observation as ObservationRecord).observation_id;
+    await phone.stop();
+    const { db } = await resolveRuntimeEnv();
+    const elements = [
+      { ref: 1, type: "TextField", label: "请输入商品名", frame: [75, 72, 270, 30] },
+      { ref: 2, type: "StaticText", label: "搜索", frame: [374, 78, 28, 17] },
+      { ref: 3, type: "StaticText", label: "暂无结果", frame: [20, 200, 100, 24] },
+    ];
+    await db.prepare(`UPDATE observations SET app_bundle_id = NULL, app_name = 'Shop',
+      screenshot_r2_key = NULL, screen_width = 420, screen_height = 912,
+      elements_json = ?, notes_json = '[]', raw_text = '' WHERE observation_id = ?`)
+      .bind(JSON.stringify(elements), observationId).run();
+    await db.prepare("UPDATE devices SET app_version = '1.0.7' WHERE device_id = ?").bind(phone.deviceId).run();
+    const input = { observation_id: observationId, ref: 1, text: "奶茶", submit: true,
+      result_texts: ["商品列表", "暂无结果"], wait_timeout_ms: 0 };
+    const result = await invokeTool(mcp, "phone_type", input);
+    const task = await getTaskById(db, String(result.structured.task_id));
+    assert.equal(task?.payload.bind_at_claim, true);
+    assert.deepEqual(task?.payload.actions, [
+      { type: "奶茶", ref: 1 },
+      { wait_until: { texts_any: ["商品列表", "暂无结果"], present_before: ["暂无结果"], ms: 5000 } },
+    ]);
+    const audit = await db.prepare("SELECT detail_json FROM audit_events WHERE task_id = ? AND event_type = 'task_enqueued'")
+      .bind(task!.task_id).first<{ detail_json: string }>();
+    assert.doesNotMatch(audit!.detail_json, /奶茶|商品列表|暂无结果/);
+
+    // An ambiguous input or an older phone retains the existing guarded search operation.
+    elements.push({ ref: 4, type: "TextField", label: "其他输入", frame: [20, 260, 200, 30] });
+    await db.prepare("UPDATE observations SET elements_json = ? WHERE observation_id = ?")
+      .bind(JSON.stringify(elements), observationId).run();
+    const ambiguous = await invokeTool(mcp, "phone_type", input);
+    const ambiguousActions = (await getTaskById(db, String(ambiguous.structured.task_id)))?.payload.actions as Array<Record<string, unknown>>;
+    assert.ok(ambiguousActions[0].search_submit);
+    elements.pop();
+    await db.prepare("UPDATE observations SET elements_json = ? WHERE observation_id = ?")
+      .bind(JSON.stringify(elements), observationId).run();
+    await db.prepare("UPDATE devices SET app_version = '1.0.6' WHERE device_id = ?").bind(phone.deviceId).run();
+    const old = await invokeTool(mcp, "phone_type", input);
+    const oldActions = (await getTaskById(db, String(old.structured.task_id)))?.payload.actions as Array<Record<string, unknown>>;
+    assert.ok(oldActions[0].search_submit);
   } finally {
     await phone.stop();
     await mcp.close();

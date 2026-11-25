@@ -312,13 +312,13 @@ final class PokiControlTargetTests: XCTestCase {
         XCTAssertTrue(wda.bodies("POST /wda/tap").isEmpty, result.text)
     }
 
-    func testRecycledRowCannotReceiveTapForPreviousItemAtTheSamePosition() async throws {
+    func testReorderedListTapsTheSameNamedItemAtItsNewPosition() async throws {
         for rowType in ["Cell", "Group"] {
-            try await assertRecycledRowIsBlocked(rowType)
+            try await assertReorderedRowIsLocated(rowType)
         }
     }
 
-    private func assertRecycledRowIsBlocked(_ rowType: String) async throws {
+    private func assertReorderedRowIsLocated(_ rowType: String) async throws {
         let wda = FakeWDA()
         wda.tree(menu(["生椰拿铁", "橙 C 美式"], rowType: rowType))
         let (core, _, _) = makeCore(wda) { $0.standaloneObservations = true }
@@ -328,10 +328,98 @@ final class PokiControlTargetTests: XCTestCase {
         wda.tree(menu(["橙 C 美式", "生椰拿铁"], rowType: rowType))
         let result = await core.call("do", ["actions": [["tap": .number(Double(ref))]]])
 
+        XCTAssertFalse(result.isError, result.text)
+        XCTAssertEqual(wda.bodies("POST /wda/tap").count, 1, result.text)
+        XCTAssertEqual(wda.bodies("POST /wda/tap").first?["y"]?.double, 235)
+    }
+
+    func testMovedOtherActionUsesItsProductTitle() async throws {
+        func page(_ names: [String]) -> [Node] {
+            [Node("CollectionView", nil, [0, 76, 390, 620], names.enumerated().map { index, name in
+                let y = Double(90 + 124 * index)
+                return Node("Cell", nil, [0, y, 390, 114], [
+                    Node("StaticText", name, [16, y + 13, 150, 35]),
+                    Node("Other", "选规格", [302, y + 23, 72, 44]),
+                ])
+            })]
+        }
+        let wda = FakeWDA()
+        wda.tree(page(["生椰拿铁", "橙 C 美式"]))
+        let (core, _, _) = makeCore(wda) { $0.standaloneObservations = true }
+        let screen = await core.call("look", [:])
+        let ref = try number(in: screen.text, onRow: "生椰拿铁")
+        wda.tree(page(["橙 C 美式", "生椰拿铁"]))
+
+        let result = await core.call("do", ["actions": [["tap": .number(Double(ref))]]])
+
+        XCTAssertFalse(result.isError, result.text)
+        XCTAssertEqual(wda.bodies("POST /wda/tap").first?["y"]?.double, 259)
+    }
+
+    func testReorderedListDoesNotGuessWhenTheItemIsMissingOrDuplicated() async throws {
+        for names in [["橙 C 美式"], ["橙 C 美式", "生椰拿铁", "生椰拿铁"]] {
+            let wda = FakeWDA()
+            wda.tree(menu(["生椰拿铁", "橙 C 美式"]))
+            let (core, _, _) = makeCore(wda) { $0.standaloneObservations = true }
+            let screen = await core.call("look", [:])
+            let ref = try number(in: screen.text, onRow: "生椰拿铁")
+            wda.tree(menu(names))
+
+            let result = await core.call("do", ["actions": [["tap": .number(Double(ref))]]])
+
+            XCTAssertTrue(result.isError, result.text)
+            XCTAssertTrue(wda.bodies("POST /wda/tap").isEmpty, result.text)
+        }
+    }
+
+    func testReorderedListStopsIfTheRelocatedActionIsCovered() async throws {
+        func page(_ names: [String], covered: Bool) -> [Node] {
+            [Node("CollectionView", nil, [0, 76, 390, 620], names.enumerated().map { index, name in
+                let y = Double(90 + 100 * index)
+                var controls = [Node("StaticText", name, [16, y + 13, 150, 35]),
+                                Node("Button", "选规格", [302, y + 23, 72, 44])]
+                if covered && name == "生椰拿铁" {
+                    controls.append(Node("Button", "立即支付", [302, y + 23, 72, 44]))
+                }
+                return Node("Cell", nil, [0, y, 390, 90], controls)
+            })]
+        }
+        let wda = FakeWDA()
+        wda.tree(page(["生椰拿铁", "橙 C 美式"], covered: false))
+        let (core, _, _) = makeCore(wda) { $0.standaloneObservations = true; $0.approvalWait = 0 }
+        let screen = await core.call("look", [:])
+        let ref = try number(in: screen.text, onRow: "生椰拿铁")
+        wda.tree(page(["橙 C 美式", "生椰拿铁"], covered: true))
+
+        let result = await core.call("do", ["actions": [["tap": .number(Double(ref))]]])
+
         XCTAssertTrue(result.isError, result.text)
-        XCTAssertTrue(result.text.contains("its list row could not be confirmed"), result.text)
         XCTAssertTrue(wda.bodies("POST /wda/tap").isEmpty, result.text)
-        _ = try number(in: result.text, onRow: "生椰拿铁")
+    }
+
+    func testMovedActionDoesNotUsePriceOrPromotionAsProductIdentity() async throws {
+        func page(_ title: String, _ detail: String, at y: Double) -> [Node] {
+            [Node("CollectionView", nil, [0, 76, 390, 620], [
+                Node("Cell", nil, [0, y, 390, 100], [
+                    Node("StaticText", detail, [16, y + 5, 100, 20]),
+                    Node("StaticText", title, [16, y + 30, 150, 35]),
+                    Node("Other", "选规格", [302, y + 23, 72, 44]),
+                ]),
+            ])]
+        }
+        for detail in ["¥13", "月售98", "推荐"] {
+            let wda = FakeWDA()
+            wda.tree(page("生椰拿铁", detail, at: 90))
+            let (core, _, _) = makeCore(wda) { $0.standaloneObservations = true }
+            let screen = await core.call("look", [:])
+            let ref = try number(in: screen.text, containing: "Other \"选规格\"")
+            wda.tree(page("橙 C 美式", detail, at: 214))
+
+            let result = await core.call("do", ["actions": [["tap": .number(Double(ref))]]])
+
+            XCTAssertTrue(result.isError, result.text)
+            XCTAssertTrue(wda.bodies("POST /wda/tap").isEmpty, result.text)
+        }
     }
 
     func testRepeatedControlsWithoutRowEvidenceAreMarkedAndDoNotReceiveNumberedTaps() async throws {
@@ -403,6 +491,52 @@ final class PokiControlTargetTests: XCTestCase {
         XCTAssertEqual(wda.bodies("POST /wda/tap").count, 1)
         XCTAssertEqual(wda.bodies("POST /wda/tap").first?["x"]?.double, 135.5)
         XCTAssertEqual(wda.bodies("POST /wda/tap").first?["y"]?.double, 534)
+    }
+
+    func testSearchEntryAcceptsRotatingSuggestionAsAccessibilityName() async throws {
+        @Sendable func tree(_ label: String, width: Double) -> JSON {
+            ["type": "XCUIElementTypeApplication", "children": [[
+                "type": "XCUIElementTypeStaticText", "label": .string(label), "name": .string(label),
+                "rect": ["x": 56, "y": 510, "width": .number(width), "height": 48],
+            ]]]
+        }
+        let original = "搜索框，输入文字查找地点、公交、地铁"
+        let wda = FakeWDA()
+        wda.set("GET /source") { _ in (200, ["value": tree(original, width: 159)]) }
+        let (core, _, _) = makeCore(wda) { $0.standaloneObservations = true }
+        let screen = await core.call("look", [:])
+        let ref = try number(in: screen.text, containing: original)
+        wda.set("GET /source") { _ in
+            (200, ["value": tree("搜索框，输入文字附近的咖啡", width: 171)])
+        }
+
+        let result = await core.call("do", ["actions": [["tap": .number(Double(ref))]]])
+
+        XCTAssertFalse(result.isError, result.text)
+        XCTAssertEqual(wda.bodies("POST /wda/tap").first?["x"]?.double, 135.5)
+        XCTAssertEqual(wda.bodies("POST /wda/tap").first?["y"]?.double, 534)
+    }
+
+    func testRotatingAccessibilityNameStillRequiresPaymentApproval() async throws {
+        @Sendable func tree(_ label: String) -> JSON {
+            ["type": "XCUIElementTypeApplication", "children": [[
+                "type": "XCUIElementTypeStaticText", "label": .string(label), "name": .string(label),
+                "rect": ["x": 56, "y": 510, "width": 159, "height": 48],
+            ]]]
+        }
+        let original = "搜索框，输入文字附近的茶饮"
+        let wda = FakeWDA()
+        wda.set("GET /source") { _ in (200, ["value": tree(original)]) }
+        let (core, _, _) = makeCore(wda) { $0.standaloneObservations = true; $0.approvalWait = 0 }
+        let screen = await core.call("look", [:])
+        let ref = try number(in: screen.text, containing: original)
+        wda.set("GET /source") { _ in (200, ["value": tree("搜索框，输入文字立即支付")]) }
+
+        let result = await core.call("do", ["actions": [["tap": .number(Double(ref))]]])
+
+        XCTAssertTrue(result.isError, result.text)
+        XCTAssertTrue(result.text.contains("needs the owner's approval"), result.text)
+        XCTAssertTrue(wda.bodies("POST /wda/tap").isEmpty, result.text)
     }
 
     func testChangedSearchEntryCannotBecomeAnotherControl() async throws {

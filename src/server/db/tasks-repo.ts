@@ -85,25 +85,35 @@ export async function getOpenCompletedAt(
   deviceId: string,
   actor: string,
 ): Promise<number | null> {
+  const preceding = await getObservationCompletion(db, observationId, deviceId, actor);
+  return preceding?.is_open === 1 ? preceding.completed_at : null;
+}
+
+export async function getObservationCompletion(
+  db: D1DatabaseLike,
+  observationId: string,
+  deviceId: string,
+  actor: string,
+): Promise<{ completed_at: number; is_open: number } | null> {
   const row = await db.prepare(
-    `SELECT t.completed_at
+    `SELECT t.completed_at,
+       CASE WHEN t.tool_name = 'do' AND json_array_length(json_extract(t.payload_json, '$.actions')) = 1
+         AND (
+           json_type(t.payload_json, '$.actions[0].launch') IS NOT NULL OR
+           (json_type(t.payload_json, '$.actions[0].path.steps[0].navigate') = 'object'
+            AND json_array_length(json_extract(t.payload_json, '$.actions[0].path.steps')) = 1)
+         ) THEN 1 ELSE 0 END AS is_open
      FROM observations o
      JOIN tasks t ON t.task_id = o.task_id AND t.device_id = o.device_id
                  AND t.result_observation_id = o.observation_id
      WHERE o.observation_id = ? AND o.device_id = ? AND o.screen_locked = 0
-       AND t.created_by = ? AND t.tool_name = 'do' AND t.status = 'succeeded'
+       AND t.created_by = ? AND t.tool_name IN ('do', 'look') AND t.status = 'succeeded'
        AND t.cancel_requested_at IS NULL AND t.error_code IS NULL
        AND t.uncertain_execution = 0 AND t.completed_at IS NOT NULL
        AND json_extract(t.result_json, '$.approval_required') IS NULL
-       AND json_extract(t.result_json, '$.handoff_required') IS NULL
-       AND json_array_length(json_extract(t.payload_json, '$.actions')) = 1
-       AND (
-         json_type(t.payload_json, '$.actions[0].launch') IS NOT NULL OR
-         (json_type(t.payload_json, '$.actions[0].path.steps[0].navigate') = 'object'
-          AND json_array_length(json_extract(t.payload_json, '$.actions[0].path.steps')) = 1)
-       )`,
-  ).bind(observationId, deviceId, actor).first<{ completed_at: number }>();
-  return row?.completed_at ?? null;
+       AND json_extract(t.result_json, '$.handoff_required') IS NULL`,
+  ).bind(observationId, deviceId, actor).first<{ completed_at: number; is_open: number }>();
+  return row;
 }
 
 export async function enqueueTask(

@@ -9,19 +9,49 @@ def patch_reach(source: Path) -> None:
     computer = source / "Computer.swift"
     actions = source / "Actions.swift"
     routines = source / "Routines.swift"
+    layout = source / "Layout.swift"
+    replace_once(
+        layout,
+        "            let encloses = c.frame.x <= target.frame.x + 0.5 && c.frame.y <= target.frame.y + 0.5 && c.frame.maxX >= target.frame.maxX - 0.5 && c.frame.maxY >= target.frame.maxY - 0.5",
+        """            // Accessibility can round a bar and its controls to slightly different edges.
+            let isLargeBar = Self.bars.contains(c.type) &&
+                (c.frame.width >= 2 * target.frame.width || c.frame.height >= 2 * target.frame.height)
+            let tolerance = isLargeBar ? 2.0 : 0.5
+            let encloses = c.frame.x <= target.frame.x + tolerance && c.frame.y <= target.frame.y + tolerance && c.frame.maxX >= target.frame.maxX - tolerance && c.frame.maxY >= target.frame.maxY - tolerance""",
+        "PokiCore tolerate rounded bar and control frames",
+    )
     replace_once(
         computer,
         "    var lastElements: [Element] { listed.map(\\.element) }",
         """    var verifiedTargets: [Int: (element: Element, point: (x: Double, y: Double))] = [:]
+    var lastCircularDismissals: (readAt: Double, nodes: Set<Int>)?
     var lastElements: [Element] { listed.map(\\.element) }""",
         "PokiCore use the verified target for the actual touch",
     )
     replace_once(
         computer,
         '            let row = targets?.annotation(for: e) ?? ""',
-        '''            let row = (targets?.reachabilityAnnotation(for: e, listed: listed) ?? "")
-                + (targets?.annotation(for: e) ?? "")''',
+        '''            var reachability = targets?.reachabilityAnnotation(for: e, listed: listed) ?? ""
+            if circularDismissals.contains(e.node) {
+                reachability = reachability.replacingOccurrences(of: " [covered]", with: "")
+            }
+            let row = reachability + (targets?.annotation(for: e) ?? "")''',
         "PokiCore report covered controls in the first read",
+    )
+    replace_once(
+        computer,
+        "        func line(_ ref: Int, _ e: Element, _ mark: String) -> String {",
+        r"""        var circularDismissals: Set<Int> = []
+        if treeRead, let targets, selectedPane == nil, !reading.invalidatesReferences, let png = reading.png {
+            circularDismissals = Set(shown.filter { element in
+                PokiDismissalEvidence.matches(element) && targets.safePoint(for: element) == nil &&
+                    PokiDismissalEvidence.corroborates(element, in: reading.elements, screen: screen, png: png)
+            }.map(\.node))
+        }
+        lastCircularDismissals = lastTreeAt.map { (readAt: $0, nodes: circularDismissals) }
+
+        func line(_ ref: Int, _ e: Element, _ mark: String) -> String {""",
+        "PokiCore remember dismissal controls confirmed in this observation",
     )
     replace_once(
         computer,

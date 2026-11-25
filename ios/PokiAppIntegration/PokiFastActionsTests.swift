@@ -17,6 +17,22 @@ final class PokiFastActionsTests: XCTestCase {
         }
     }
 
+    private func installPageTransition(_ wda: FakeWDA, initial: [Node], next: [Node]) -> LockedBox<Int> {
+        let first = FakeWDA()
+        let second = FakeWDA()
+        first.tree(initial, app: "Shop")
+        second.tree(next, app: "Shop")
+        install(wda, initial: [], destination: [Node("StaticText", "Categories", [16, 160, 200, 44])])
+        let reads = LockedBox(0)
+        wda.set("GET /source") { _ in
+            reads.update { $0 += 1 }
+            let source = reads.value == 1 ? first : second
+            let reply = try await source.send(method: "GET", url: URL(string: "http://127.0.0.1/source")!, body: nil, timeout: 1)
+            return (reply.status, try JSON.parse(reply.body))
+        }
+        return reads
+    }
+
     private func navigate(_ label: String = "Explore", ready: String = "Search catalog", fresh: Bool = false) -> JSON {
         ["path": ["goal": "Open destination", "steps": [["navigate": [
             "app": .string(bundle), "destination": ["label": .string(label), "type": "Button", "ready_text": .string(ready)],
@@ -52,6 +68,445 @@ final class PokiFastActionsTests: XCTestCase {
         XCTAssertFalse(result.isError, result.text)
         XCTAssertTrue(result.text.contains("destination \"Search catalog\" visible"), result.text)
         XCTAssertEqual(wda.bodies("POST /wda/tap").count, 1)
+        let beforeTap = wda.sent.prefix { $0 != "POST /wda/tap" }
+        XCTAssertEqual(beforeTap.filter { $0 == "GET /source" }.count, 2, beforeTap.joined(separator: ", "))
+    }
+
+    func testOpensOnlyTheUniqueInteractiveEntryByLabelWithoutALandmark() async {
+        let action: JSON = ["path": ["steps": [["navigate": [
+            "app": .string(bundle), "destination": ["label": "Explore"],
+        ]]]]]
+        for count in [1, 2] {
+            let wda = FakeWDA()
+            var nodes = [Node("StaticText", "Explore", [24, 148, 55, 18])]
+            for index in 0..<count {
+                nodes.append(Node("Button", "Explore", [Double(16 + 90 * index), 100, 78, 72]))
+            }
+            install(wda, initial: nodes, destination: [Node("StaticText", "Catalog", [16, 160, 200, 44])])
+            let (core, _, _) = makeCore(wda) { $0.standaloneObservations = true }
+            let result = await core.call("do", ["actions": [action]])
+            XCTAssertEqual(result.isError, count != 1, result.text)
+            XCTAssertEqual(wda.bodies("POST /wda/tap").count, count == 1 ? 1 : 0, result.text)
+        }
+    }
+
+    func testIconTileCanBeTappedOnItsScreenshotCaption() async {
+        let wda = FakeWDA()
+        let host = FakeHost()
+        var page = overlappingSearchPage(label: "Delivery")
+        page[1].children[1].frame = [11, 143, 74, 77]
+        install(wda, initial: page, destination: [Node("StaticText", "Categories", [16, 160, 200, 44])])
+        host.texts.value = [visual("Delivery", x: 48, y: 210), visual("Old page", x: 90, y: 250)]
+        let (core, _, _) = makeCore(wda, host: host) { $0.standaloneObservations = true }
+        let result = await core.call("do", ["actions": [navigate("Delivery", ready: "Categories")]])
+        XCTAssertFalse(result.isError, result.text)
+        let taps = wda.bodies("POST /wda/tap")
+        XCTAssertEqual(taps.count, 1)
+        XCTAssertEqual(taps.first?["y"]?.double ?? 0, 210, accuracy: 1)
+    }
+
+    func testIconTileDoesNotBypassDuplicateScreenshotLabels() async {
+        let wda = FakeWDA()
+        let host = FakeHost()
+        var page = overlappingSearchPage(label: "Delivery")
+        page[1].children[1].frame = [11, 143, 74, 77]
+        install(wda, initial: page)
+        host.texts.value = [visual("Delivery", x: 48, y: 210), visual("Delivery", x: 90, y: 250)]
+        let (core, _, _) = makeCore(wda, host: host) { $0.standaloneObservations = true }
+
+        let result = await core.call("do", ["actions": [navigate("Delivery", ready: "Categories")]])
+
+        XCTAssertTrue(result.isError, result.text)
+        XCTAssertTrue(result.text.contains("entry label appears more than once"), result.text)
+        XCTAssertTrue(wda.bodies("POST /wda/tap").isEmpty, result.text)
+    }
+
+    func testVerifiedEntryIsTappedBeforeRepeatingOverlappingPageRecognition() async {
+        let wda = FakeWDA()
+        let host = FakeHost()
+        var page = overlappingSearchPage(label: "Delivery")
+        page[0].children[1].frame = [16, 350, 150, 44]
+        page[1].children[1].frame = [11, 143, 74, 77]
+        install(wda, initial: page, destination: [Node("StaticText", "Categories", [16, 160, 200, 44])])
+        host.texts.value = [visual("Delivery", x: 48, y: 210), visual("Today's entries", x: 90, y: 370)]
+        let screenshots = LockedBox(0)
+        wda.set("GET /screenshot") { _ in
+            screenshots.update { $0 += 1 }
+            if screenshots.value > 1 { host.texts.value = [] }
+            return (200, ["value": .string(Data("png".utf8).base64EncodedString())])
+        }
+        let (core, _, _) = makeCore(wda, host: host) { $0.standaloneObservations = true; $0.toolDeadline = 12 }
+
+        let result = await core.call("do", ["actions": [navigate("Delivery", ready: "Categories")]])
+
+        XCTAssertFalse(result.isError, result.text)
+        XCTAssertEqual(wda.bodies("POST /wda/tap").count, 1, result.text)
+    }
+
+    func testNavigationKeepsItsTargetWhenTheNextReadHasOverlappingPages() async {
+        let wda = FakeWDA()
+        let host = FakeHost()
+        var page = overlappingSearchPage(label: "Delivery")
+        page[1].children[1].frame = [11, 143, 74, 77]
+        let reads = installPageTransition(wda, initial: [Node("Button", "Delivery", [11, 143, 74, 77])], next: page)
+        host.texts.value = [visual("Delivery", x: 48, y: 210)]
+        let (core, _, _) = makeCore(wda, host: host) { $0.standaloneObservations = true; $0.toolDeadline = 12 }
+
+        let result = await core.call("do", ["actions": [navigate("Delivery", ready: "Categories")]])
+
+        XCTAssertFalse(result.isError, result.text)
+        XCTAssertTrue(result.text.contains("sent; screen-confirmed entry"), result.text)
+        XCTAssertEqual(wda.bodies("POST /wda/tap").count, 1, result.text)
+        XCTAssertGreaterThan(reads.value, 1)
+    }
+
+    func testNavigationRefreshesOneFrameWhenEntryLabelsAreTemporarilyDuplicated() async {
+        for freshTreeHasOnePage in [false, true] {
+            let wda = FakeWDA()
+            let host = FakeHost()
+            let entry = Node("Button", "Delivery", [11, 143, 74, 77])
+            var page = overlappingSearchPage(label: "Delivery")
+            page[1].children[1].frame = [11, 143, 74, 77]
+            _ = installPageTransition(wda, initial: [entry], next: page)
+            let screenshots = LockedBox(0)
+            let screenshotsAtTap = LockedBox(0)
+            wda.set("GET /screenshot") { _ in
+                screenshots.update { $0 += 1 }
+                if screenshots.value == 1, freshTreeHasOnePage { wda.tree([entry], app: "Shop") }
+                host.texts.value = screenshots.value == 1
+                    ? [self.visual("Delivery", x: 48, y: 210), self.visual("Delivery", x: 90, y: 250)]
+                    : [self.visual("Delivery", x: 48, y: 210)]
+                return (200, ["value": .string(Data("png".utf8).base64EncodedString())])
+            }
+            wda.set("POST /wda/tap") { [wda] _ in
+                screenshotsAtTap.value = screenshots.value
+                wda.tree([Node("StaticText", "Categories", [16, 160, 200, 44])], app: "Shop")
+                return (200, ["value": .null])
+            }
+            let (core, _, _) = makeCore(wda, host: host) { $0.standaloneObservations = true; $0.toolDeadline = 12 }
+
+            let result = await core.call("do", ["actions": [navigate("Delivery", ready: "Categories")]])
+
+            XCTAssertFalse(result.isError, result.text)
+            XCTAssertEqual(wda.bodies("POST /wda/tap").count, 1, result.text)
+            XCTAssertEqual(screenshotsAtTap.value, 2)
+        }
+    }
+
+    func testNavigationStopsAfterOneFrameWhenDuplicateLabelsPersist() async {
+        let wda = FakeWDA()
+        let host = FakeHost()
+        var page = overlappingSearchPage(label: "Delivery")
+        page[1].children[1].frame = [11, 143, 74, 77]
+        _ = installPageTransition(wda, initial: [Node("Button", "Delivery", [11, 143, 74, 77])], next: page)
+        host.texts.value = [visual("Delivery", x: 48, y: 210), visual("Delivery", x: 90, y: 250)]
+        let (core, _, _) = makeCore(wda, host: host) { $0.standaloneObservations = true; $0.toolDeadline = 12 }
+
+        let result = await core.call("do", ["actions": [navigate("Delivery", ready: "Categories")]])
+
+        XCTAssertTrue(result.isError, result.text)
+        XCTAssertTrue(result.text.contains("2 matches, 1 within the target"), result.text)
+        XCTAssertTrue(wda.bodies("POST /wda/tap").isEmpty, result.text)
+        XCTAssertEqual(wda.sent.filter { $0 == "GET /screenshot" }.count, 3)
+    }
+
+    func testConfirmedPageCanLocateAnEntryWhenOtherVisibleTextRepeatsItsLabel() async {
+        let wda = FakeWDA()
+        let host = FakeHost()
+        let frame: [Double] = [0, 60, 390, 740]
+        install(wda, initial: [
+            Node("Other", nil, frame, [
+                Node("StaticText", "Old page", [16, 230, 150, 44]),
+                Node("StaticText", "Old item", [16, 350, 150, 44]),
+            ]),
+            Node("Group", nil, frame, [
+                Node("Button", "Delivery", [11, 143, 74, 77]),
+                Node("StaticText", "Fresh choices", [16, 350, 150, 44]),
+            ]),
+        ], destination: [Node("StaticText", "Categories", [16, 160, 200, 44])])
+        host.texts.value = [visual("Delivery", x: 48, y: 210),
+                            visual("Fresh choices", x: 90, y: 370),
+                            visual("Delivery", x: 275, y: 500),
+                            visual("Delivery", x: 325, y: 520)]
+        let screenshotsAtTap = LockedBox(0)
+        wda.set("POST /wda/tap") { [wda] _ in
+            screenshotsAtTap.value = wda.sent.filter { $0 == "GET /screenshot" }.count
+            wda.tree([Node("StaticText", "Categories", [16, 160, 200, 44])], app: "Shop")
+            return (200, ["value": .null])
+        }
+        let (core, _, _) = makeCore(wda, host: host) { $0.standaloneObservations = true; $0.toolDeadline = 12 }
+
+        let result = await core.call("do", ["actions": [navigate("Delivery", ready: "Categories")]])
+
+        XCTAssertFalse(result.isError, result.text)
+        XCTAssertEqual(wda.bodies("POST /wda/tap").count, 1, result.text)
+        XCTAssertEqual(screenshotsAtTap.value, 1)
+    }
+
+    func testConfirmedPageStillRejectsMultipleLabelsInsideTheEntry() async {
+        let wda = FakeWDA()
+        let host = FakeHost()
+        let frame: [Double] = [0, 60, 390, 740]
+        install(wda, initial: [
+            Node("Other", nil, frame, [
+                Node("StaticText", "Old page", [16, 230, 150, 44]),
+                Node("StaticText", "Old item", [16, 350, 150, 44]),
+            ]),
+            Node("Group", nil, frame, [
+                Node("Button", "Delivery", [11, 143, 74, 77]),
+                Node("StaticText", "Fresh choices", [16, 350, 150, 44]),
+            ]),
+        ])
+        host.texts.value = [visual("Delivery", x: 38, y: 210),
+                            visual("Delivery", x: 58, y: 210),
+                            visual("Fresh choices", x: 90, y: 370)]
+        let (core, _, _) = makeCore(wda, host: host) { $0.standaloneObservations = true; $0.toolDeadline = 12 }
+
+        let result = await core.call("do", ["actions": [navigate("Delivery", ready: "Categories")]])
+
+        XCTAssertTrue(result.isError, result.text)
+        XCTAssertTrue(wda.bodies("POST /wda/tap").isEmpty, result.text)
+    }
+
+    func testDuplicateEntryDoesNotPreventRecognizingTheVisibleDestination() async {
+        let wda = FakeWDA()
+        let host = FakeHost()
+        let frame: [Double] = [0, 60, 390, 740]
+        install(wda, initial: [
+            Node("Other", nil, frame, [
+                Node("StaticText", "Old page", [16, 230, 150, 44]),
+                Node("StaticText", "Old item", [16, 350, 150, 44]),
+            ]),
+            Node("Group", nil, frame, [
+                Node("Button", "Delivery", [11, 143, 74, 77]),
+                Node("StaticText", "Fresh choices", [16, 350, 150, 44]),
+                Node("StaticText", "Categories", [16, 450, 150, 44]),
+            ]),
+        ])
+        host.texts.value = [visual("Delivery", x: 38, y: 210),
+                            visual("Delivery", x: 58, y: 210),
+                            visual("Fresh choices", x: 90, y: 370)]
+        let (core, _, _) = makeCore(wda, host: host) { $0.standaloneObservations = true; $0.toolDeadline = 12 }
+
+        let result = await core.call("do", ["actions": [navigate("Delivery", ready: "Categories")]])
+
+        XCTAssertFalse(result.isError, result.text)
+        XCTAssertTrue(result.text.contains("already visible"), result.text)
+        XCTAssertTrue(wda.bodies("POST /wda/tap").isEmpty, result.text)
+    }
+
+    func testNavigationRejectsDuplicatesWhenAnotherPageCannotBeRuledOut() async {
+        let frames: [([Double], [Double])] = [
+            ([0, 60, 390, 740], [0, 60, 390, 740]),
+            ([0, 120, 390, 500], [0, 60, 390, 740]),
+        ]
+        for (frame, otherFrame) in frames {
+            let wda = FakeWDA()
+            let host = FakeHost()
+            install(wda, initial: [
+                Node("Other", nil, frame, [
+                    Node("StaticText", "Old page", [16, 230, 150, 44]),
+                    Node("StaticText", "Old item", [16, 350, 150, 44]),
+                ]),
+                Node("Group", nil, frame, [
+                    Node("Button", "Delivery", [11, 143, 74, 77]),
+                    Node("StaticText", "Fresh choices", [16, 350, 150, 44]),
+                ]),
+                Node("CollectionView", nil, otherFrame, [
+                    Node("StaticText", "Loading", [16, 500, 150, 44]),
+                ]),
+            ])
+            host.texts.value = [visual("Delivery", x: 48, y: 210),
+                                visual("Fresh choices", x: 90, y: 370),
+                                visual("Delivery", x: 275, y: 500)]
+            let (core, _, _) = makeCore(wda, host: host) { $0.standaloneObservations = true; $0.toolDeadline = 12 }
+
+            let result = await core.call("do", ["actions": [navigate("Delivery", ready: "Categories")]])
+
+            XCTAssertTrue(result.isError, result.text)
+            XCTAssertTrue(result.text.contains("2 matches, 1 within the target"), result.text)
+            XCTAssertTrue(wda.bodies("POST /wda/tap").isEmpty, result.text)
+        }
+    }
+
+    func testNavigationDoesNotRefreshDuplicatesWhenTimeBudgetIsShort() async {
+        let wda = FakeWDA()
+        let host = FakeHost()
+        var page = overlappingSearchPage(label: "Delivery")
+        page[1].children[1].frame = [11, 143, 74, 77]
+        _ = installPageTransition(wda, initial: [Node("Button", "Delivery", [11, 143, 74, 77])], next: page)
+        host.texts.value = [visual("Delivery", x: 48, y: 210), visual("Delivery", x: 90, y: 250)]
+        let (core, _, _) = makeCore(wda, host: host) {
+            $0.standaloneObservations = true; $0.actionCap = 1; $0.toolDeadline = 12
+        }
+
+        let result = await core.call("do", ["actions": [navigate("Delivery", ready: "Categories")]])
+
+        XCTAssertTrue(result.isError, result.text)
+        XCTAssertTrue(wda.bodies("POST /wda/tap").isEmpty, result.text)
+        XCTAssertEqual(wda.sent.filter { $0 == "GET /screenshot" }.count, 2)
+    }
+
+    func testNavigationDoesNotRefreshDuplicatesAcrossANewDialog() async {
+        let wda = FakeWDA()
+        let host = FakeHost()
+        var page = overlappingSearchPage(label: "Delivery")
+        page[1].children[1].frame = [11, 143, 74, 77]
+        _ = installPageTransition(wda, initial: [Node("Button", "Delivery", [11, 143, 74, 77])], next: page)
+        host.texts.value = [visual("Delivery", x: 48, y: 210), visual("Delivery", x: 90, y: 250)]
+        let covered = page + [Node("Alert", "Permission", [30, 300, 330, 200])]
+        wda.set("GET /screenshot") { [wda] _ in
+            wda.tree(covered, app: "Shop")
+            return (200, ["value": .string(Data("png".utf8).base64EncodedString())])
+        }
+        let (core, _, _) = makeCore(wda, host: host) { $0.standaloneObservations = true; $0.toolDeadline = 12 }
+
+        let result = await core.call("do", ["actions": [navigate("Delivery", ready: "Categories")]])
+
+        XCTAssertTrue(result.isError, result.text)
+        XCTAssertTrue(result.text.contains("navigation target changed"), result.text)
+        XCTAssertTrue(wda.bodies("POST /wda/tap").isEmpty, result.text)
+    }
+
+    func testNavigationDoesNotRefreshDuplicatesAfterForegroundAppChanges() async {
+        let wda = FakeWDA()
+        let host = FakeHost()
+        var page = overlappingSearchPage(label: "Delivery")
+        page[1].children[1].frame = [11, 143, 74, 77]
+        _ = installPageTransition(wda, initial: [Node("Button", "Delivery", [11, 143, 74, 77])], next: page)
+        host.texts.value = [visual("Delivery", x: 48, y: 210), visual("Delivery", x: 90, y: 250)]
+        wda.set("GET /screenshot") { [wda] _ in
+            wda.set("GET /wda/activeAppInfo") { _ in
+                (200, ["value": ["bundleId": "com.example.other", "name": "Other"]])
+            }
+            return (200, ["value": .string(Data("png".utf8).base64EncodedString())])
+        }
+        let (core, _, _) = makeCore(wda, host: host) { $0.standaloneObservations = true; $0.toolDeadline = 12 }
+
+        let result = await core.call("do", ["actions": [navigate("Delivery", ready: "Categories")]])
+
+        XCTAssertTrue(result.isError, result.text)
+        XCTAssertTrue(result.text.contains("navigation target changed"), result.text)
+        XCTAssertTrue(wda.bodies("POST /wda/tap").isEmpty, result.text)
+    }
+
+    func testNavigationTransitionStillStopsForPaymentAndNewDialogs() async {
+        for label in ["立即支付", "Delivery"] {
+            let wda = FakeWDA()
+            let host = FakeHost()
+            var page = overlappingSearchPage(label: label)
+            page[1].children[1].frame = [11, 143, 74, 77]
+            _ = installPageTransition(wda, initial: [Node("Button", label, [11, 143, 74, 77])], next: page)
+            host.texts.value = [visual(label, x: 48, y: 210)]
+            if label == "Delivery" {
+                let covered = page + [Node("Alert", "Permission", [30, 300, 330, 200])]
+                wda.set("GET /screenshot") { [wda] _ in
+                    wda.tree(covered, app: "Shop")
+                    return (200, ["value": .string(Data("png".utf8).base64EncodedString())])
+                }
+            }
+            let (core, _, _) = makeCore(wda, host: host) { $0.standaloneObservations = true; $0.toolDeadline = 12 }
+
+            let result = await core.call("do", ["actions": [navigate(label, ready: "Categories")]])
+
+            XCTAssertTrue(result.isError, result.text)
+            XCTAssertTrue(result.text.contains(label == "Delivery" ? "target changed" : "owner's approval"), result.text)
+            XCTAssertTrue(wda.bodies("POST /wda/tap").isEmpty, result.text)
+        }
+    }
+
+    func testNavigationTransitionDoesNotTapAnEntryOnTheHiddenPage() async {
+        let wda = FakeWDA()
+        let host = FakeHost()
+        let frame: [Double] = [0, 60, 390, 740]
+        let page = [
+            Node("Group", nil, frame, [
+                Node("StaticText", "搜", [300, 100, 72, 34]),
+                Node("StaticText", "Visible page", [16, 230, 150, 44]),
+                Node("StaticText", "Visible item", [16, 280, 150, 44]),
+            ]),
+            Node("Other", nil, frame, [
+                Node("Button", "搜", [300, 100, 72, 34]),
+                Node("StaticText", "Old page", [16, 230, 150, 44]),
+                Node("StaticText", "Old item", [16, 280, 150, 44]),
+            ]),
+        ]
+        _ = installPageTransition(wda, initial: [Node("Button", "搜", [300, 100, 72, 34])], next: page)
+        host.texts.value = [visual("搜", x: 336, y: 117),
+                            visual("Visible page", x: 90, y: 250), visual("Visible item", x: 90, y: 300)]
+        let (core, _, _) = makeCore(wda, host: host) {
+            $0.standaloneObservations = true; $0.actionCap = 1; $0.toolDeadline = 12
+        }
+
+        let result = await core.call("do", ["actions": [navigate("搜", ready: "Categories")]])
+
+        XCTAssertTrue(result.isError, result.text)
+        XCTAssertTrue(wda.bodies("POST /wda/tap").isEmpty, result.text)
+    }
+
+    func testScreenshotTextDoesNotProveAnEntryOnAHiddenPage() async {
+        let wda = FakeWDA()
+        let host = FakeHost()
+        let frame: [Double] = [0, 60, 390, 740]
+        install(wda, initial: [
+            Node("Group", nil, frame, [
+                Node("StaticText", "搜", [300, 100, 72, 34]),
+                Node("StaticText", "Visible page", [16, 230, 150, 44]),
+                Node("StaticText", "Visible item", [16, 280, 150, 44]),
+            ]),
+            Node("Other", nil, frame, [
+                Node("Button", "搜", [300, 100, 72, 34]),
+                Node("StaticText", "Old page", [16, 230, 150, 44]),
+                Node("StaticText", "Old item", [16, 280, 150, 44]),
+            ]),
+        ])
+        host.texts.value = [visual("搜", x: 336, y: 117),
+                            visual("Visible page", x: 90, y: 250), visual("Visible item", x: 90, y: 300)]
+        let (core, _, _) = makeCore(wda, host: host) {
+            $0.standaloneObservations = true; $0.actionCap = 1; $0.toolDeadline = 12
+        }
+
+        let result = await core.call("do", ["actions": [navigate("搜", ready: "Categories")]])
+
+        XCTAssertTrue(result.isError, result.text)
+        XCTAssertTrue(wda.bodies("POST /wda/tap").isEmpty, result.text)
+    }
+
+    func testIconCaptionAllowsOnePointOfTextFrameRounding() async {
+        let wda = FakeWDA()
+        let host = FakeHost()
+        var page = overlappingSearchPage(label: "Delivery")
+        page[1].children[1].frame = [11, 143, 74, 77]
+        install(wda, initial: page, destination: [Node("StaticText", "Categories", [16, 160, 200, 44])])
+        host.texts.value = [visual("Delivery", x: 48, y: 215.5)]
+        let (core, _, _) = makeCore(wda, host: host) { $0.standaloneObservations = true; $0.toolDeadline = 12 }
+
+        let result = await core.call("do", ["actions": [navigate("Delivery", ready: "Categories")]])
+
+        XCTAssertFalse(result.isError, result.text)
+        XCTAssertEqual(wda.bodies("POST /wda/tap").count, 1, result.text)
+    }
+
+    func testRepeatedPageRecognitionReportsWhyItStopped() async {
+        let wda = FakeWDA()
+        let host = FakeHost()
+        var page = overlappingSearchPage(label: "Delivery")
+        page[0].children[1].frame = [16, 350, 150, 44]
+        install(wda, initial: page)
+        host.texts.value = [visual("搜索框", x: 90, y: 117), visual("Today's entries", x: 90, y: 370)]
+        let screenshots = LockedBox(0)
+        wda.set("GET /screenshot") { _ in
+            screenshots.update { $0 += 1 }
+            if screenshots.value > 1 { host.texts.value = [] }
+            return (200, ["value": .string(Data("png".utf8).base64EncodedString())])
+        }
+        let (core, _, _) = makeCore(wda, host: host) { $0.standaloneObservations = true; $0.toolDeadline = 12 }
+
+        let result = await core.call("do", ["actions": [navigate("Delivery", ready: "Categories")]])
+
+        XCTAssertTrue(result.isError, result.text)
+        XCTAssertTrue(result.text.contains("entry label could not be read"), result.text)
+        XCTAssertTrue(wda.bodies("POST /wda/tap").isEmpty, result.text)
     }
 
     func testNavigationLaunchesTheRequestedAppBeforeTapping() async {
@@ -255,6 +710,7 @@ final class PokiFastActionsTests: XCTestCase {
         let result = await core.call("do", ["actions": [navigate()]])
         XCTAssertTrue(result.isError, result.text)
         XCTAssertTrue(result.text.contains("overlapping pages could not be confirmed"), result.text)
+        XCTAssertTrue(result.text.contains("entry label could not be read"), result.text)
         XCTAssertTrue(wda.bodies("POST /wda/tap").isEmpty, result.text)
     }
 
@@ -430,5 +886,28 @@ final class PokiFastActionsTests: XCTestCase {
         XCTAssertFalse(result.isError, result.text)
         XCTAssertTrue(result.text.contains("result \"No results\" appeared"), result.text)
         XCTAssertEqual(wda.bodies("POST /wda/keys").count, 2)
+    }
+
+    func testLiveSearchCanWaitForResultsWithoutSendingReturn() async {
+        let wda = FakeWDA()
+        let field = Node("TextField", "请输入商品名", [75, 72, 270, 30])
+        let search = Node("StaticText", "搜索", [374, 78, 28, 17])
+        install(wda, initial: [field, search, Node("StaticText", "No results", [16, 160, 200, 44])])
+        wda.set("POST /wda/keys") { [wda] _ in
+            wda.tree([Node("TextField", "请输入商品名", [75, 72, 270, 30], value: "tea"), search,
+                      Node("StaticText", "Results", [16, 160, 200, 44])], app: "Shop")
+            return (200, ["value": .null])
+        }
+        let (core, _, _) = makeCore(wda) { $0.standaloneObservations = true; $0.toolDeadline = 20 }
+        _ = await core.call("look", [:])
+        let result = await core.call("do", ["actions": [
+            ["type": "tea", "ref": 1],
+            ["wait_until": ["texts_any": ["Results", "No results"], "present_before": ["No results"], "ms": 5000]],
+        ]])
+        XCTAssertFalse(result.isError, result.text)
+        XCTAssertTrue(result.text.contains("result \"Results\" appeared"), result.text)
+        let keys = wda.bodies("POST /wda/keys")
+        XCTAssertEqual(keys.count, 1, result.text)
+        XCTAssertFalse(keys.contains { ($0["value"]?.array?.compactMap(\.string) ?? []).contains("\n") })
     }
 }

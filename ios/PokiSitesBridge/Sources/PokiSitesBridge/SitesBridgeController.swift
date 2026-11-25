@@ -565,15 +565,21 @@ public actor SitesBridgeController {
             isError: reply.isError,
             screenshotJPEG: reply.screenshotJPEG
         )
+        let parsedAt = clock.now
         let runner = PokiRunnerStateMapper.normalize(await executor.currentRunnerState())
+        let runnerStateAt = clock.now
         var observation = pendingApproval == nil && pendingHandoff == nil && !execution.isCancelled
             ? OpeningEntryEvidence.applying(to: parsed, task: task)
             : parsed.observation
         let uploadReadyAt = clock.now
-        if startedAt.duration(to: uploadReadyAt) >= .seconds(5) {
-            let coreMs = Self.milliseconds(startedAt.duration(to: replyAt))
-            let resultMs = Self.milliseconds(replyAt.duration(to: uploadReadyAt))
-            observation.notes.append("Phone timing before upload: PokiCore \(coreMs) ms; result preparation \(resultMs) ms.")
+        if task.tool_name == "look" || task.tool_name == "do" {
+            let executionMs = Self.milliseconds(startedAt.duration(to: replyAt))
+            let parseMs = Self.milliseconds(replyAt.duration(to: parsedAt))
+            let runnerStateMs = Self.milliseconds(parsedAt.duration(to: runnerStateAt))
+            let observationMs = Self.milliseconds(runnerStateAt.duration(to: uploadReadyAt))
+            observation.notes.append(
+                "phone_timing_ms: execution=\(executionMs) parse=\(parseMs) runner_state=\(runnerStateMs) observation=\(observationMs)"
+            )
         }
         let resultDTO = ResultRequestDTO(
             task_id: task.task_id,

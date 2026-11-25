@@ -8,19 +8,20 @@ import { newId } from "../crypto.ts";
 import type { BridgeRuntimeEnv } from "../db/d1-types.ts";
 import { recordAuditEvent, redactActionPayload } from "../db/audit-repo.ts";
 import { setEmergencyStop } from "../db/devices-repo.ts";
-import { getObservationById } from "../db/observations-repo.ts";
+import { getObservationById, type ObservationWithMeta } from "../db/observations-repo.ts";
 import { expireStaleTasksAndLeases } from "../db/task-lease-repo.ts";
 import {
   cancelAllPendingForDevice,
   countQueuedTasks,
   enqueueTask,
   getActiveTaskForDevice,
-  getOpenCompletedAt,
+  getObservationCompletion,
   getTaskById,
   requestCancelTask,
 } from "../db/tasks-repo.ts";
 import { AppError } from "../http.ts";
 import { maybeRunCleanup } from "./cleanup-service.ts";
+import { validateTypingTarget } from "./typing-target.ts";
 import { verifiedOpeningEntry } from "./opening-entry.ts";
 import {
   hydrateObservationAndScreenshot,
@@ -137,10 +138,13 @@ export async function dispatchPhoneDo(
     require_fresh_observation: boolean;
     actions: Array<Record<string, unknown>>;
     opening_labels?: string[];
+    bind_at_claim?: boolean;
     app?: string | false;
     full: boolean;
     finish: boolean;
     include_screenshot: IncludeScreenshotMode;
+    defer_screenshot?: boolean;
+    guarded_sequence?: Array<{ actions: Array<Record<string, unknown>>; target?: Record<string, unknown> }>;
     idempotency_key?: string;
     wait_timeout_ms: number;
   },
@@ -152,8 +156,10 @@ export async function dispatchPhoneDo(
   live_execution: boolean;
   settled_observed_at_ms?: number;
   settle_poll_count: number;
+  settledObservation?: ObservationWithMeta | null;
   screenshot_read_ms?: number;
   since_open_device_result_received_ms?: number;
+  since_previous_device_result_received_ms?: number;
   interstep_timing_unavailable?: boolean;
 }> {
   const nowMs = Date.now();
@@ -176,8 +182,16 @@ export async function dispatchPhoneDo(
     );
   }
 
+  if (typeof input.actions[0]?.type === "string" && typeof input.actions[0].ref === "number" &&
+      device.last_observation_id) {
+    const current = await getObservationById(env.db, device.last_observation_id);
+    validateTypingTarget(input.actions, current?.observation ?? null);
+  }
+
   const payload: Record<string, unknown> = {
     actions: input.actions,
+    ...(input.guarded_sequence ? { guarded_sequence: input.guarded_sequence } : {}),
+    ...(input.bind_at_claim ? { bind_at_claim: true } : {}),
     ...(input.opening_labels ? { opening_labels: input.opening_labels } : {}),
     full: input.full,
     finish: input.finish,
@@ -190,7 +204,9 @@ export async function dispatchPhoneDo(
     taskId,
     deviceId: device.device_id,
     toolName: "do",
-    actionSummary: summarizeActions(input.actions),
+    actionSummary: input.guarded_sequence
+      ? `do (on-phone sequence, ${input.guarded_sequence.length} stages)`
+      : summarizeActions(input.actions),
     payload,
     observationId: input.observation_id ?? device.last_observation_id,
     idempotencyKey: input.idempotency_key,
@@ -203,7 +219,7 @@ export async function dispatchPhoneDo(
   const ordinaryLaunch = Array.isArray(actions) && actions.length === 1 &&
     actions[0] !== null && typeof actions[0] === "object" &&
     Object.keys(actions[0]).length === 1 && Object.hasOwn(actions[0], "launch");
-  const [, settled, openTiming] = await Promise.all([
+  const [, settled, previousTiming] = await Promise.all([
     recordAuditEvent(env.db, {
       deviceId: device.device_id,
       taskId: task.task_id,
@@ -214,28 +230,30 @@ export async function dispatchPhoneDo(
     }),
     waitForTaskSettle(env, device.device_id, task.task_id, input.wait_timeout_ms, device.last_seen_at, ordinaryLaunch),
     input.observation_id && task.task_id === taskId
-      ? getOpenCompletedAt(env.db, input.observation_id, device.device_id, actor)
-        .then((completedAt) => ({ completedAt, unavailable: false }))
-        .catch(() => ({ completedAt: null, unavailable: true }))
-      : Promise.resolve({ completedAt: null, unavailable: false }),
+      ? getObservationCompletion(env.db, input.observation_id, device.device_id, actor)
+        .then(completion => ({ completion, unavailable: false }))
+        .catch(() => ({ completion: null, unavailable: true }))
+      : Promise.resolve({ completion: null, unavailable: false }),
   ]);
   const entry = !input.full && input.include_screenshot === "auto"
     ? verifiedOpeningEntry(settled.task, settled.settledObservation?.observation) : undefined;
   const { observation, screenshot, screenshot_read_ms } = await hydrateObservationAndScreenshot(
     env,
     settled.task.result_observation_id,
-    entry ? "never" : input.include_screenshot,
+    entry || input.defer_screenshot ? "never" : input.include_screenshot,
     input.full,
     settled.task.status === "failed" || settled.task.status === "timed_out" || settled.task.uncertain_execution,
     settled.settledObservation,
   );
-  const sinceOpenResultReceived = openTiming.completedAt !== null && openTiming.completedAt <= task.created_at
-    ? task.created_at - openTiming.completedAt : undefined;
+  const previous = previousTiming.completion;
+  const interstepMs = previous && previous.completed_at <= task.created_at
+    ? task.created_at - previous.completed_at : undefined;
   return {
     ...settled, observation, screenshot, screenshot_read_ms, live_execution: task.task_id === taskId,
-    ...(sinceOpenResultReceived !== undefined
-      ? { since_open_device_result_received_ms: sinceOpenResultReceived } : {}),
-    ...(openTiming.unavailable ? { interstep_timing_unavailable: true } : {}),
+    ...(interstepMs !== undefined && previous?.is_open === 1
+      ? { since_open_device_result_received_ms: interstepMs } : {}),
+    ...(interstepMs !== undefined ? { since_previous_device_result_received_ms: interstepMs } : {}),
+    ...(previousTiming.unavailable ? { interstep_timing_unavailable: true } : {}),
   };
 }
 

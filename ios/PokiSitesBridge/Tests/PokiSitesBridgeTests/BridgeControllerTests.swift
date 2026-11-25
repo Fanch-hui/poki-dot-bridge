@@ -248,6 +248,10 @@ final class BridgeControllerTests: XCTestCase {
         XCTAssertTrue(paths.contains("/api/device/poll"))
         XCTAssertTrue(paths.contains("/api/device/result"))
         XCTAssertTrue(paths.contains("/api/device/cancel"))
+        let resultBody = try XCTUnwrap(transport.requests.first { $0.path == "/api/device/result" }?.body)
+        let result = try JSONDecoder().decode(ResultRequestDTO.self, from: Data(resultBody.utf8))
+        let timing = try XCTUnwrap(result.observation?.notes.first { $0.hasPrefix("phone_timing_ms: ") })
+        XCTAssertNotNil(timing.range(of: #"^phone_timing_ms: execution=\d+ parse=\d+ runner_state=\d+ observation=\d+$"#, options: .regularExpression))
         let pollHeaders = transport.requests.first { $0.path == "/api/device/poll" }?.headers ?? [:]
         XCTAssertEqual(pollHeaders["OAI-Sites-Authorization"], "Bearer bypass_tok")
         XCTAssertEqual(pollHeaders["Authorization"], "Bearer tok_abc")

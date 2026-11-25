@@ -18,6 +18,25 @@ export const TargetSpecSchema = z.union([
     ),
 ]);
 
+const TapTargetSchema = z.union([
+  z.number().int().positive(),
+  PointTupleSchema,
+  z.strictObject({
+    ref: z.number().int().positive().optional(),
+    x: z.number().optional(),
+    y: z.number().optional(),
+  }).refine(
+    (target) => target.ref !== undefined || (target.x !== undefined && target.y !== undefined),
+    "Target object requires ref or x and y",
+  ),
+  z.strictObject({
+    label: z.string().trim().min(1).max(160),
+    type: z.string().trim().min(1).max(64).optional(),
+    row_label: z.string().trim().min(1).max(160).optional(),
+    if_needed: z.literal(true).optional().describe("For an option: skip the tap if the exact state named in the following wait_until is already visible."),
+  }),
+]);
+
 const PathTargetSchema = z.union([
   z.string().min(1),
   PointTupleSchema,
@@ -58,20 +77,50 @@ const PathStepSchema = z
     expect: z.string().optional(),
     optional: z.boolean().optional(),
   })
-  .passthrough();
+  .passthrough()
+  .superRefine((step, context) => {
+    const actionNames = [
+      "tap", "type", "key", "swipe", "scroll_to", "long_press", "drag", "pinch",
+      "button", "launch", "wait_until", "wait", "back", "navigate",
+    ];
+    const actions = actionNames.filter((name) => step[name] !== undefined);
+    if (actions.length !== 1) {
+      context.addIssue({
+        code: "custom",
+        message: "A path step must contain exactly one action.",
+      });
+    }
+  });
 
 export const PokiActionSchema = z.union([
-  z.object({ tap: TargetSpecSchema }),
-  z.object({
+  z.strictObject({ tap: TapTargetSchema }),
+  z.strictObject({
+    search: z.strictObject({
+      text: z.string().trim().min(1).max(500).regex(/^[^\r\n]+$/),
+      field: z.strictObject({
+        label: z.string().trim().min(1).max(160),
+        type: z.enum(["TextField", "SearchField", "TextView"]).optional(),
+      }),
+      result_texts: z.array(z.string().trim().min(1).max(120)).min(1).max(6),
+      submit: z.literal(true).optional().describe("Press Return only in a confirmed native SearchField. Omit for live results."),
+    }).refine(
+      (search) => search.result_texts.every((label) => label.toLowerCase() !== search.text.toLowerCase()),
+      "Search result labels must differ from the typed query",
+    ).refine(
+      (search) => search.submit !== true || search.field.type === "SearchField",
+      "Return requires a field with type SearchField",
+    ),
+  }),
+  z.strictObject({
     type: z.string(),
     ref: z.number().int().positive().optional(),
     clear: z.boolean().optional(),
     via: z.enum(["keys", "paste"]).optional(),
   }),
-  z.object({
+  z.strictObject({
     key: z.enum(["return", "enter", "delete", "backspace", "tab", "space", "escape"]),
   }),
-  z.object({
+  z.strictObject({
     swipe: z.union([
       z.enum(["up", "down", "left", "right"]),
       z.object({
@@ -81,7 +130,7 @@ export const PokiActionSchema = z.union([
       }),
     ]),
   }),
-  z.object({
+  z.strictObject({
     scroll_to: z.union([
       z.string().min(1),
       z
@@ -95,7 +144,7 @@ export const PokiActionSchema = z.union([
         .refine((v) => v.text !== undefined || v.ref !== undefined, "scroll_to needs text or ref"),
     ]),
   }),
-  z.object({
+  z.strictObject({
     drag: z.union([
       z.array(z.number()).length(4),
       z.object({
@@ -107,7 +156,7 @@ export const PokiActionSchema = z.union([
       }),
     ]),
   }),
-  z.object({
+  z.strictObject({
     long_press: z.union([
       z.number().int().positive(),
       PointTupleSchema,
@@ -124,7 +173,7 @@ export const PokiActionSchema = z.union([
         ),
     ]),
   }),
-  z.object({
+  z.strictObject({
     pinch: z
       .object({
         ref: z.number().int().positive().optional(),
@@ -137,10 +186,10 @@ export const PokiActionSchema = z.union([
         "pinch needs ref or x,y",
       ),
   }),
-  z.object({
+  z.strictObject({
     button: z.enum(["home", "lock", "volume_up", "volume-up", "volume_down", "volume-down"]),
   }),
-  z.object({
+  z.strictObject({
     launch: z.union([
       z.string().min(1),
       z
@@ -155,9 +204,9 @@ export const PokiActionSchema = z.union([
         ),
     ]),
   }),
-  z.object({ back: z.literal(true) }),
-  z.object({ wait: z.number().min(0).max(3000) }),
-  z.object({
+  z.strictObject({ back: z.literal(true) }),
+  z.strictObject({ wait: z.number().min(0).max(3000) }),
+  z.strictObject({
     wait_until: z.union([
       z.string().min(1),
       z
@@ -175,7 +224,7 @@ export const PokiActionSchema = z.union([
         ),
     ]),
   }),
-  z.object({
+  z.strictObject({
     handoff: z.union([
       z.literal(false),
       z.object({
@@ -184,7 +233,7 @@ export const PokiActionSchema = z.union([
       }),
     ]),
   }),
-  z.object({
+  z.strictObject({
     path: z.object({
       goal: z.string().min(1),
       steps: z.array(PathStepSchema).min(1).max(20),
@@ -193,7 +242,7 @@ export const PokiActionSchema = z.union([
       read: z.array(z.string()).optional(),
     }),
   }),
-  z.object({
+  z.strictObject({
     run: z.union([
       z.string().min(1),
       z.object({

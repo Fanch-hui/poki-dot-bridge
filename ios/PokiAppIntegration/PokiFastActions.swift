@@ -1,12 +1,5 @@
 import Foundation
 
-private struct NavigationEntryEvidence {
-    let target: SkillTarget
-    let element: Element
-    let point: (x: Double, y: Double)
-    let observedAt: Double
-}
-
 extension Computer {
     private static let selectionActions = [
         "选规格", "选择规格", "選規格", "選擇規格", "加入购物", "添加到购物", "添加至购物",
@@ -64,8 +57,8 @@ extension Computer {
         }
     }
 
-    private func blockedScreen(_ elements: [Element]) -> Bool {
-        elements.contains { ["Alert", "Sheet"].contains($0.type) && !$0.frame.isEmpty }
+    func blockedScreen(_ elements: [Element]) -> Bool {
+        elements.contains { ["Alert", "Sheet", "Dialog", "Popover"].contains($0.type) && !$0.frame.isEmpty }
     }
 
     func waitForResultLabels(_ spec: JSON, until: Double) async throws -> String {
@@ -101,10 +94,11 @@ extension Computer {
         guard let app = spec["app"]?.string, !app.isEmpty,
               let destination = spec["destination"],
               let label = destination["label"]?.string, !label.isEmpty,
-              let ready = destination["ready_text"]?.string, !ready.isEmpty,
-              ready.caseInsensitiveCompare(label) != .orderedSame else {
-            throw ActionFailure(message: "navigate needs an app, an entry label, and a distinct destination label", delivery: .notSent)
+              destination["ready_text"]?.string?.isEmpty != true,
+              destination["ready_text"]?.string?.caseInsensitiveCompare(label) != .orderedSame else {
+            throw ActionFailure(message: "navigate needs an app and an entry label; any destination landmark must be distinct", delivery: .notSent)
         }
+        let ready = destination["ready_text"]?.string
         guard !Self.selectionActions.contains(where: { label.lowercased().contains($0) }) else {
             throw ActionFailure(message: "navigate requires a navigation entry; choosing options or adding items needs a separate action", delivery: .notSent)
         }
@@ -132,10 +126,10 @@ extension Computer {
         var entryTapped = false
         do {
             let target = SkillTarget(type: destination["type"]?.string ?? SkillTarget.anyType, label: label)
-            let tree = try await navigationScreen(bundle: bundle, until: until, entry: target)
+            let tree = try await navigationScreen(bundle: bundle, until: until, entry: target, ready: ready)
             lastAll = tree.elements
             lastForeground = tree.foreground
-            if tree.evidence == nil, visibleLabel(ready, in: tree.elements, screen: screen, allowSearchField: true) {
+            if let ready, tree.evidence == nil, visibleLabel(ready, in: tree.elements, screen: screen, allowSearchField: true) {
                 runEndedOnARead = true
                 return "navigate: \(opened.isEmpty ? "app already in front; " : "\(opened); ")destination \"\(ready)\" already visible"
             }
@@ -144,11 +138,34 @@ extension Computer {
                 tapped = try await tapVisibleEntry(evidence, app: bundle, screen: screen, until: until)
             } else {
                 var entry: [String: JSON] = ["label": .string(label)]
-                if let type = destination["type"]?.string, !type.isEmpty { entry["type"] = .string(type) }
+                if ready == nil {
+                    let targets = PokiControlTargets(tree.elements, screen: screen)
+                    let matches = tree.elements.filter {
+                        ["Button", "Link", "Cell", "SearchField"].contains($0.type) && target.matches($0) &&
+                            $0.label?.caseInsensitiveCompare(label) == .orderedSame && !targets.visibleFrame($0).isEmpty
+                    }
+                    guard matches.count == 1, let match = matches.first, targets.safePoint(for: match) != nil,
+                          PokiOverlay.detect(in: tree.elements, screen: screen) == nil else {
+                        throw ActionFailure(message: "no unique visible navigation entry; continue from the current screen", delivery: .notSent)
+                    }
+                    entry["type"] = .string(match.type)
+                } else if let type = destination["type"]?.string, !type.isEmpty {
+                    entry["type"] = .string(type)
+                }
                 let routine = try Self.pathRoutine(["goal": "Open destination", "steps": [["tap": .object(entry)]]])
-                tapped = try await replay(routine, params: [:], store: nil, until: until, expectedBundle: bundle)
+                let initialTarget = routine.steps.first?.target.flatMap { target -> String? in
+                    let matches = listable(tree.elements, screen).filter(target.matches)
+                    let targets = PokiControlTargets(tree.elements, screen: screen)
+                    guard matches.count == 1, let match = matches.first, targets.safePoint(for: match) != nil else { return nil }
+                    return "\(match.key)@\(match.frame.described)"
+                }
+                tapped = try await replay(routine, params: [:], store: nil, until: until,
+                                          expectedBundle: bundle, initialTarget: initialTarget)
             }
             entryTapped = true
+            guard let ready else {
+                return "navigate: \(opened.isEmpty ? "" : "\(opened); ")\(tapped); inspect the resulting screen"
+            }
             let deadline = min(until - 0.9, now() + 3)
             while now() < deadline {
                 let updated = try await navigationScreen(bundle: bundle, until: deadline)
@@ -170,7 +187,7 @@ extension Computer {
         }
     }
 
-    private func navigationScreen(bundle: String, until: Double, entry: SkillTarget? = nil) async throws
+    private func navigationScreen(bundle: String, until: Double, entry: SkillTarget? = nil, ready: String? = nil) async throws
         -> (elements: [Element], foreground: Foreground, evidence: NavigationEntryEvidence?) {
         var lastProblem = "the target app is not yet in front"
         let deadline = min(until - 0.3, now() + 4)
@@ -182,7 +199,8 @@ extension Computer {
                 }
                 if tree.foreground.bundleID == bundle, !tree.elements.isEmpty {
                     if let screen = size {
-                        let page = try await navigationPage(tree.elements, screen: screen, until: deadline, entry: entry)
+                        let page = try await navigationPage(tree.elements, screen: screen, until: deadline,
+                                                            entry: entry, expectedBundle: bundle, ready: ready)
                         return (page.elements, tree.foreground, page.evidence)
                     }
                     return (tree.elements, tree.foreground, nil)
@@ -198,96 +216,88 @@ extension Computer {
         try await navigationPage(elements, screen: screen, until: until).elements
     }
 
-    private func navigationPage(_ elements: [Element], screen: ScreenSize, until: Double, entry: SkillTarget? = nil)
+    func navigationPage(_ elements: [Element], screen: ScreenSize, until: Double, entry: SkillTarget? = nil,
+                        expectedBundle: String? = nil, requireEntryProof: Bool = false, ready: String? = nil)
         async throws -> (elements: [Element], evidence: NavigationEntryEvidence?) {
-        guard let pages = PokiPageVisibility(elements: elements, screen: screen) else { return (elements, nil) }
+        let pages = PokiPageVisibility(elements: elements, screen: screen)
+        guard pages != nil || requireEntryProof else { return (elements, nil) }
         let left = until - now() - 0.2
         let screenshotAt = now()
-        guard left >= 0.4,
-              let png = try? await runner.screenshot(timeout: min(1.5, left)),
-              let texts = try? await withDeadline(max(0.3, until - now() - 0.2), "checking overlapping pages", { [host] in
+        guard left >= 0.4, let png = try? await runner.screenshot(timeout: min(1.5, left)) else {
+            throw ActionFailure(message: "overlapping pages could not be confirmed: screenshot unavailable or timed out; continue from the current screen", delivery: .notSent)
+        }
+        // Both reads use the same picture. A slow full-page read must not consume
+        // the time available to identify a small icon caption in that picture.
+        let caption = Task { [self] in
+            guard let entry else { return nil as NavigationEntryEvidence? }
+            return await captionEvidence(entry, elements: elements, screen: screen, png: png,
+                                         screenshotAt: screenshotAt, until: until)
+        }
+        defer { caption.cancel() }
+        guard let texts = try? await withDeadline(max(0.3, until - now() - 0.2), "checking overlapping pages", { [host] in
                   await host.recognizeText(inPNG: png)
               }) else {
-            throw ActionFailure(message: "overlapping pages could not be confirmed; continue from the current screenshot", delivery: .notSent)
+            throw ActionFailure(message: "overlapping pages could not be confirmed: screenshot text recognition unavailable or timed out; continue from the current screenshot", delivery: .notSent)
         }
-        if let visible = pages.filter(elements, using: texts) { return (visible, nil) }
+        let candidates = elements.filter { element in
+            ["Button", "Link"].contains(element.type) && entry?.matches(element) == true
+        }
+        let target = candidates.count == 1 ? candidates.first : nil
+        let resolution = pages?.filter(elements, using: texts, target: target)
+        let visible = resolution?.elements
+        func inVisiblePage(_ evidence: NavigationEntryEvidence) -> Bool {
+            guard let visible else { return true }
+            return visible.contains { $0.node == evidence.element.node }
+        }
         if let entry, let evidence = visibleEntry(entry, in: elements, screen: screen, texts: texts,
-                                                  observedAt: screenshotAt) {
+                                                  observedAt: screenshotAt,
+                                                  confirmedPage: resolution?.targetConfirmed == true),
+           inVisiblePage(evidence) {
             return (elements, evidence)
         }
-        throw ActionFailure(message: "overlapping pages could not be confirmed; continue from the current screenshot", delivery: .notSent)
-    }
-
-    private func visibleEntry(_ target: SkillTarget, in elements: [Element], screen: ScreenSize,
-                              texts: [RecognizedText], observedAt: Double) -> NavigationEntryEvidence? {
-        guard let label = target.label?.trimmingCharacters(in: .whitespacesAndNewlines), !label.isEmpty else { return nil }
-        let candidates = elements.filter { ["Button", "Link"].contains($0.type) && target.matches($0) }
-        guard candidates.count == 1, let element = candidates.first,
-              element.label?.trimmingCharacters(in: .whitespacesAndNewlines).caseInsensitiveCompare(label) == .orderedSame else { return nil }
-        let targets = PokiControlTargets(elements, screen: screen)
-        guard let point = targets.safePoint(for: element), entryHasNoCompetingControl(element, point, elements, targets) else { return nil }
-        let matches = texts.filter { $0.text.trimmingCharacters(in: .whitespacesAndNewlines).caseInsensitiveCompare(label) == .orderedSame }
-        guard matches.count == 1, let match = matches.first else { return nil }
-        let box = Rect(x: match.box.x * screen.width, y: match.box.y * screen.height,
-                       width: match.box.width * screen.width, height: match.box.height * screen.height)
-        let frame = targets.visibleFrame(element)
-        guard !box.isEmpty, frame.contains((box.x, box.y)), frame.contains((box.maxX, box.maxY)),
-              box.contains(point) else { return nil }
-        return NavigationEntryEvidence(target: target, element: element, point: point, observedAt: observedAt)
-    }
-
-    private func entryHasNoCompetingControl(_ entry: Element, _ point: (x: Double, y: Double), _ elements: [Element],
-                                            _ targets: PokiControlTargets) -> Bool {
-        let contact = Rect(x: point.x - 4, y: point.y - 4, width: 8, height: 8)
-        let actionable: Set<String> = ["Button", "Link", "TextField", "SearchField", "SecureTextField",
-                                       "Switch", "Toggle", "CheckBox", "RadioButton", "Slider", "TextView",
-                                       "Stepper", "PickerWheel", "ComboBox", "PopUpButton", "MenuButton", "Tab"]
-        return !elements.contains {
-            $0.node != entry.node && actionable.contains($0.type) && !targets.visibleFrame($0).intersection(contact).isEmpty
+        if let label = entry?.label,
+           !texts.contains(where: { $0.text.trimmingCharacters(in: .whitespacesAndNewlines).caseInsensitiveCompare(label) == .orderedSame }),
+           let evidence = await caption.value, inVisiblePage(evidence) {
+            return (elements, evidence)
         }
-    }
-
-    private func tapVisibleEntry(_ evidence: NavigationEntryEvidence, app: String, screen: ScreenSize,
-                                 until: Double) async throws -> String {
-        try Task.checkCancellation()
-        guard let tree = try? await runner.tree(timeout: min(config.readTimeout, max(0.3, until - now() - 0.2)),
-                                                format: config.treeFormat, countsAsMiss: false),
-              tree.foreground.bundleID == app, !blockedScreen(tree.elements), now() - evidence.observedAt <= 2.5 else {
-            throw ActionFailure(message: "navigation target changed before its touch; continue from the current screen", delivery: .notSent)
+        let matches = entry?.label.map { label in
+            texts.filter { $0.text.trimmingCharacters(in: .whitespacesAndNewlines).caseInsensitiveCompare(label) == .orderedSame }
+        } ?? []
+        if let visible, !requireEntryProof, matches.count <= 1 { return (visible, nil) }
+        if let visible, !requireEntryProof, let ready,
+           visibleLabel(ready, in: visible, screen: screen, allowSearchField: true) {
+            return (visible, nil)
         }
-        let matching = tree.elements.filter { ["Button", "Link"].contains($0.type) && evidence.target.matches($0) }
-        guard matching.count == 1, let entry = matching.first,
-              entry.key == evidence.element.key, entry.identifier == evidence.element.identifier,
-              entry.frame == evidence.element.frame else {
-            throw ActionFailure(message: "navigation target changed before its touch; continue from the current screen", delivery: .notSent)
+        let reason: String
+        if entry?.label != nil {
+            if matches.count > 1 {
+                if !requireEntryProof, let entry, let expectedBundle, until - now() > 2 {
+                    guard let tree = try? await runner.tree(timeout: min(config.readTimeout, until - now() - 0.2),
+                                                            format: config.treeFormat, countsAsMiss: false) else {
+                        throw ActionFailure(message: "the screen could not be refreshed after duplicate entry labels", delivery: .notSent)
+                    }
+                    guard tree.foreground.bundleID == expectedBundle, !blockedScreen(tree.elements),
+                          PokiOverlay.detect(in: tree.elements, screen: screen) == nil else {
+                        throw ActionFailure(message: "navigation target changed before its touch; continue from the current screen", delivery: .notSent)
+                    }
+                    return try await navigationPage(tree.elements, screen: screen, until: until,
+                                                    entry: entry, requireEntryProof: true)
+                }
+                let candidates = elements.filter { ["Button", "Link"].contains($0.type) && entry?.matches($0) == true }
+                let inTarget = candidates.count == 1 ? matches.filter {
+                    let point = (x: $0.box.centre.x * screen.width, y: $0.box.centre.y * screen.height)
+                    return candidates[0].frame.contains(point)
+                }.count : 0
+                reason = "the entry label appears more than once in the screenshot (\(matches.count) matches, \(inTarget) within the target)"
+            } else if matches.isEmpty {
+                reason = "the entry label could not be read in the screenshot or its icon caption"
+            } else {
+                reason = "the visible label could not be matched safely to its control"
+            }
+        } else {
+            reason = "the screenshot did not identify a visible page"
         }
-        let targets = PokiControlTargets(tree.elements, screen: screen)
-        guard let point = targets.safePoint(for: entry), point.x == evidence.point.x, point.y == evidence.point.y,
-              entryHasNoCompetingControl(entry, point, tree.elements, targets) else {
-            throw ActionFailure(message: "navigation target is no longer safely tappable; continue from the current screen", delivery: .notSent)
-        }
-        lastAll = tree.elements
-        lastForeground = tree.foreground
-        refs[Self.runRef] = entry
-        verifiedTargets[Self.runRef] = (entry, point)
-        defer { refs[Self.runRef] = nil; verifiedTargets[Self.runRef] = nil }
-        let tap: JSON = ["tap": .number(Double(Self.runRef))]
-        var scan = SensitiveScan(front: tree.foreground, secureOnScreen: tree.elements.contains(where: \.isSecure),
-                                 allElements: tree.elements)
-        if let reason = sensitive(tap, &scan) {
-            throw ActionFailure(message: "navigation entry needs the owner's approval (\(reason)); choose it from the current screen", delivery: .notSent)
-        }
-        try Task.checkCancellation()
-        let description: String
-        do {
-            (_, description) = try await perform(tap, until: until)
-        } catch let failure as RunnerError {
-            throw ActionFailure(message: "navigation entry failed (\(failure))", delivery: failure.delivery)
-        }
-        let recordedTarget = evidence.target.type == SkillTarget.anyType ? SkillTarget(entry) : evidence.target
-        let step = SkillStep(action: ["tap": ["ref": "@"]], target: recordedTarget, app: app, secret: nil)
-        trace.append(RecordedStep(step: step, typed: nil, keysBefore: []))
-        return "\(description) (sent; screen-confirmed entry)"
+        throw ActionFailure(message: "overlapping pages could not be confirmed: \(reason); continue from the current screenshot", delivery: .notSent)
     }
 
     func launchReadyPause(_ pause: Double, bundle: String) async -> (waited: Double, settled: Bool) {

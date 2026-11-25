@@ -24,14 +24,22 @@ def patch_startup(bridge_root: Path, core: Path) -> None:
     replace_once(
         computer,
         "        var notes = reading.notes\n        let popup = size.flatMap",
-        """        if let launchedApp, !inWorkspace {
+        """        if waitForLoadingAfterTap, !inWorkspace, let size, let previous = lastTree,
+           !reading.invalidatesReferences, reading.png != nil,
+           let app = reading.foreground?.bundleID, app == lastForeground?.bundleID {
+            let confirmation = await confirmTransitionRead(reading, screen: size, app: app,
+                                                           previousTree: previous, until: until)
+            reading = confirmation.0
+            if !confirmation.1 { return unconfirmedTransitionResult(reading, did: did, extra: extra) }
+        }
+        if let launchedApp, !inWorkspace {
             let confirmation = await confirmLaunchRead(reading, app: launchedApp, until: until)
             reading = confirmation.0
             if !confirmation.1 { return unconfirmedLaunchResult(reading, app: launchedApp, did: did, extra: extra) }
         }
         var notes = reading.notes
         let popup = size.flatMap""",
-        "PokiCore reject unconfirmed launch observations",
+        "PokiCore confirm launch and post-navigation screenshots",
     )
     replace_once(
         computer,
@@ -46,8 +54,8 @@ def patch_startup(bridge_root: Path, core: Path) -> None:
     )
     replace_once(
         computer,
-        """                                            moreKind == ActionKind.tap.rawValue)""",
-        """                                            moreKind == ActionKind.tap.rawValue,
+        """                                               moreKind == ActionKind.waitUntil.rawValue))))""",
+        """                                               moreKind == ActionKind.waitUntil.rawValue))),
                                         launchedApp: directLaunch)""",
         "PokiCore pass the launched app to the paired read",
     )

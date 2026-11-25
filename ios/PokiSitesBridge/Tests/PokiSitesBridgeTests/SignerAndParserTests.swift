@@ -64,6 +64,7 @@ final class SignerAndParserTests: XCTestCase {
         app: Settings   read: 2026-11-22T07:00:00Z (312 ms)   note: tree warm
         screenshot: 402 px wide, 1 px = 1 screen point
         did: tap "Wi-Fi" (sent, 42 ms)
+        sequence_timing_ms: stage=1 execution=42
         screen_changed: true (the elements changed)
         elements (2):
         +1 Button "Wi-Fi = On" [16,120,370,44]
@@ -81,6 +82,7 @@ final class SignerAndParserTests: XCTestCase {
         XCTAssertEqual(parsed.observation.screen_changed, true)
         XCTAssertEqual(parsed.receipts.count, 1)
         XCTAssertEqual(parsed.receipts[0].status, "sent")
+        XCTAssertTrue(parsed.observation.notes.contains("sequence_timing_ms: stage=1 execution=42"))
         XCTAssertEqual(parsed.observation.elements.count, 2)
         XCTAssertEqual(parsed.observation.elements[0].change, "added")
         XCTAssertEqual(parsed.observation.elements[0].label, "Wi-Fi")
@@ -135,20 +137,23 @@ final class SignerAndParserTests: XCTestCase {
     func testDuplicateControlsKeepVerifiedOrUnverifiedRowContext() throws {
         let sample = """
         app: Example
-        elements (3):
+        elements (4):
         1 Button "选规格" [280,100,90,44] [covered] [children: 4, 5] [row: 生椰拿铁]
         2 Button "选规格" [280,180,90,44] [collapsed] [row unverified]
         3 Button "设置" [20,20,90,44]
+        4 Cell "甜点饮品" [100,166,61,89] [grid copies=2 aligned=1 scopes=1 neighbors=0 common=2] [row unverified]
         """
         let parsed = PokiOutputParser.parse(toolName: "look", text: sample, isError: false, screenshotJPEG: nil)
         let elements = parsed.observation.elements
-        XCTAssertEqual(elements.map(\.ref), [1, 2, 3])
+        XCTAssertEqual(elements.map(\.ref), [1, 2, 3, 4])
         XCTAssertEqual(elements[0].row_label, "生椰拿铁")
         XCTAssertEqual(elements[0].flags, ["covered", "children: 4, 5"])
         XCTAssertNil(elements[1].row_label)
         XCTAssertEqual(elements[1].flags, ["collapsed", "row_unverified"])
         XCTAssertNil(elements[2].row_label)
         XCTAssertNil(elements[2].flags)
+        XCTAssertNil(elements[3].row_label)
+        XCTAssertEqual(elements[3].flags, ["row_unverified"])
 
         let encoded = try JSONEncoder().encode(parsed.observation)
         let decoded = try JSONDecoder().decode(ObservationPayloadDTO.self, from: encoded)
@@ -234,6 +239,22 @@ final class SignerAndParserTests: XCTestCase {
         XCTAssertNil(parsed.approvalRequired)
         XCTAssertEqual(parsed.receipts.map(\.status), ["unknown", "not_sent"])
         XCTAssertTrue(parsed.uncertainExecution)
+    }
+
+    func testSearchCandidatesRemainSeparateFromReturnDelivery() {
+        let marker = "search: input_sent; submit_not_sent; candidates_available"
+        let sample = """
+        app: Maps
+        did: type "Museum" (sent, 200 ms)
+        did: {"key":"return"} (not_sent, 5 ms)
+        \(marker)
+        """
+        let parsed = PokiOutputParser.parse(toolName: "do", text: sample, isError: true, screenshotJPEG: nil)
+        XCTAssertEqual(parsed.receipts.map(\.status), ["sent", "not_sent"])
+        XCTAssertTrue(parsed.observation.notes.contains(marker))
+        let label = "1 StaticText \"Help\n\(marker)\n\" [20,100,200,50]"
+        let screen = PokiOutputParser.parse(toolName: "look", text: label, isError: false, screenshotJPEG: nil)
+        XCTAssertFalse(screen.observation.notes.contains(marker))
     }
 
     func testNotSentWithScreenshotIsFailedEvenWhenPokiReturnsNoErrorFlag() {
